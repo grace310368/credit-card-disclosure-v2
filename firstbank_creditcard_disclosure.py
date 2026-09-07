@@ -178,6 +178,8 @@ def build_result(
         "entry": entry_url,
         "report_url": report_url or "",
         "month": month or "",
+        "data_month": month or "",
+        "source": {"source_type": "html", "source_url": entry_url, "official_site": True},
         "metric_units": dict(METRIC_UNITS),
         "metrics": metrics or {},
         "message": message or "",

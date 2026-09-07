@@ -6,6 +6,7 @@ import html as html_lib
 import json
 import re
 import ssl
+import time
 import sys
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -178,24 +179,36 @@ def now_iso() -> str:
     return datetime.now(tz).isoformat(timespec="seconds")
 
 
-def request_text(url: str) -> str:
-    req = Request(url, headers=HEADERS, method="GET")
+RETRY_ATTEMPTS = 3
 
-    # Some bank sites may present TLS chains that fail in certain local trust stores.
-    # Try default verification first, then fall back once for operational robustness.
-    try:
-        with urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            charset = resp.headers.get_content_charset() or "utf-8"
-            return raw.decode(charset, errors="replace")
-    except Exception as first_exc:
-        if "CERTIFICATE_VERIFY_FAILED" not in str(first_exc):
+
+def request_text(url: str) -> str:
+    """先驗證憑證，失敗時改不驗證重試一次；遠銀官網偶發 connection reset，另做退避重試。"""
+    req = Request(url, headers=HEADERS, method="GET")
+    last_exc: Exception | None = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            try:
+                with urlopen(req, timeout=30) as resp:
+                    raw = resp.read()
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    return raw.decode(charset, errors="replace")
+            except Exception as first_exc:
+                if "CERTIFICATE_VERIFY_FAILED" not in str(first_exc):
+                    raise
+                insecure_ctx = ssl._create_unverified_context()
+                with urlopen(req, timeout=30, context=insecure_ctx) as resp:
+                    raw = resp.read()
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    return raw.decode(charset, errors="replace")
+        except HTTPError:
             raise
-        insecure_ctx = ssl._create_unverified_context()
-        with urlopen(req, timeout=30, context=insecure_ctx) as resp:
-            raw = resp.read()
-            charset = resp.headers.get_content_charset() or "utf-8"
-            return raw.decode(charset, errors="replace")
+        except (URLError, ConnectionError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(2 * attempt)
+    assert last_exc is not None
+    raise last_exc
 
 
 def strip_tags(raw_html: str) -> str:

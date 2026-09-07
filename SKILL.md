@@ -24,7 +24,7 @@ description: 當使用者要抓取、整理、回補、同步或維護台灣銀�
 > `<yyyymm>` = 西元年月（如 202605）、`<月>` = 民國格式（如 `115年05月`）。
 > 若使用者沒指定月份，先讀工作簿最新 `YYYYMM`，目標月通常是它的下一個月（官方揭露約落後 2 個月）。
 
-**步驟 0（僅首次或環境有疑慮時）**：確認中信來源檔 `creditcardinfo/input/中信信用卡<yyyymm>.xlsx` 已存在，
+**步驟 0（僅首次或環境有疑慮時）**：確認中信來源檔 `creditcardinfo/input/中信信用卡<yyyymm>.xlsx` 已存在（放在腳本同層也找得到；多個月份並存時腳本依 `--month` 挑對應檔），
 **缺這個檔 ctbc 一定 failed，先請使用者上傳**。可用 preflight 檢查：
 `python creditcardinfo/Script/run_all_banks.py --preflight --month <月>`
 （input_files 同步驟 1；只看 `import:openpyxl`、`import:pypdf`、`ctbc_source_file` 三項，未 staged 的腳本檢查失敗屬預期）
@@ -137,7 +137,7 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 | `ctbc_...py` | **本機檔** `input/中信信用卡<yyyymm>.xlsx`，不上網 | `--month` `--input` | — | 自身＋來源 xlsx（需 openpyxl） |
 | `fubon_...py` | 官網 PDF（需 pypdf） | `--month` | 恆用 insecure | 自身 |
 | `dbs_...py` | 官網 PDF（需 pypdf） | `--month` | 自動 fallback | 自身 |
-| `cathay` `esun` `taishin` `ubot` `sinopac` `feib` `_...py` | 官網 HTML / API | `--month` | 自動 fallback | 自身 |
+| `cathay` `esun` `taishin` `ubot` `sinopac` `feib` `_...py` | 官網 HTML / API（台新從法定揭露列表頁自動找「信用卡金融資訊」連結；台新/遠銀連線重置會重試 3 次） | `--month` | 自動 fallback | 自身 |
 | `firstbank_...py` | 官網 HTML（內建重試最長 ~170s） | `--month` `--allow-insecure` `--retries` `--timeout` | 第三段需 `--allow-insecure` | 自身 |
 | `update_credit_card_workbook.py` | 主控：寫月 block＋委派＋年度整理＋讀回驗證 | `--workbook` `--summary` `--month` `--repair-partial-blocks` `--annual-only`（`--skip-*` 平常不要用） | 不上網 | 自身＋3 委派腳本＋3 共用模組＋summary＋工作簿 |
 | `run_market_total.py` | 金管會 ZIP → `市場總計` 列 13 欄 | `--workbook` `--base-month` `--lookback-months` `--zip-file` | 自動 fallback | 自身＋`percent_utils.py`＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |

@@ -475,6 +475,8 @@ def flatten_result_fields(result: dict[str, Any]) -> dict[str, Any]:
 
     result["bank_key"] = bank_key or result.get("bank_key")
     result["bank_name"] = bank_name
+    if not result.get("data_month") and result.get("month"):
+        result["data_month"] = result["month"]
 
     # 讓 update_credit_card_workbook.py 的 first_present(...) 可直接取值。
     flattened_metric_keys = [
@@ -659,7 +661,7 @@ def run_preflight(month: str) -> int:
                 "detail": f"無法解析月份：{month}",
             })
         else:
-            search_dirs = [BASE_DIR.parent / "input", BASE_DIR / "input", BASE_DIR.parent]
+            search_dirs = [BASE_DIR.parent / "input", BASE_DIR / "input", BASE_DIR.parent, BASE_DIR]
             matches: list[str] = []
             for directory in search_dirs:
                 if directory.is_dir():

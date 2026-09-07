@@ -42,7 +42,8 @@
 
 ### 資料抓取層（不寫 Excel）
 
-- `Script/<bank>_creditcard_disclosure.py` × 10：從官網（中信為本機上傳檔）抓資料，輸出標準 metrics JSON。
+- `Script/<bank>_creditcard_disclosure.py` × 10：從官網（中信為本機上傳檔）抓資料，輸出標準 metrics JSON（含 `data_month`）。
+  台新的頁面編號會隨官網改版變動，腳本先讀法定揭露列表頁找「信用卡金融資訊」連結；台新、遠銀對偶發的 connection reset 重試 3 次。
   金額欄位以來源單位（仟元）回傳，並在 `metric_units` 宣告；不依賴共用模組，各自內建所需函式。
 - `Script/run_all_banks.py`：循序執行各銀行腳本、正規化並彙整為 summary JSON。
   - 卡數轉數字；`*_thousand` 金額轉 `*_million`（保留原始仟元欄）；百分比轉小數比率；補出扁平欄位供回寫層讀取
@@ -134,7 +135,7 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 
 ## 中信（CTBC）來源檔
 
-`中信信用卡<yyyymm>.xlsx` 的 14 個項目順序固定，解析腳本依固定順序抓取：
+`中信信用卡<yyyymm>.xlsx`（放在 `input/` 或腳本同層皆可；多個月份並存時依 `--month` 挑對應檔）的 14 個項目順序固定，解析腳本依固定順序抓取：
 
 1. 流通卡數
 2. 有效卡數

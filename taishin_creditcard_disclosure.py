@@ -6,6 +6,7 @@ import html as html_lib
 import json
 import re
 import ssl
+import time
 import sys
 import unicodedata
 from datetime import datetime, timedelta, timezone
@@ -103,7 +104,14 @@ configure_utf8_stdio()
 BANK_KEY = "taishin"
 BANK_NAME = "台新銀行"
 
-ENTRY = "https://www.taishinbank.com.tw/TSB/personal/common/legal-disclaimers/TSBankPublicDisclosure-000263/"
+# 法定揭露列表頁；「信用卡金融資訊」的頁面編號會隨改版變動（000263 → 000271），執行時從列表頁找最新連結。
+LISTING_URL = "https://www.taishinbank.com.tw/TSB/personal/common/legal-disclaimers/"
+ENTRY = "https://www.taishinbank.com.tw/TSB/personal/common/legal-disclaimers/TSBankPublicDisclosure-000271/"
+DISCLOSURE_LINK_RE = re.compile(
+    r'href="(?P<href>(?:https?://www\.taishinbank\.com\.tw)?/TSB/personal/common/legal-disclaimers/TSBankPublicDisclosure-[\w-]+/?)"[^>]*>\s*(?P<text>[^<]{0,60}?)\s*<',
+    re.I,
+)
+RETRY_ATTEMPTS = 3
 
 # 台新銀行這支腳本由官網 HTML 抽取信用卡金融資訊。
 SOURCE_AMOUNT_UNIT = "仟元"
@@ -222,22 +230,32 @@ def is_taishin_host(url: str) -> bool:
 
 def request_text(url: str, steps: list[str] | None = None) -> str:
     req = Request(url, headers=HEADERS, method="GET")
-
-    try:
-        with urlopen(req, timeout=30, context=make_ssl_context(verify=True)) as resp:
-            raw = resp.read()
-            return decode_response_bytes(raw, resp.headers.get("Content-Type"))
-    except URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        if isinstance(reason, ssl.SSLCertVerificationError) and is_taishin_host(url):
-            if steps is not None:
-                steps.append(
-                    "STEP 1.1: 預設 SSL 驗證失敗，對台新官方站啟用受限 fallback：略過憑證驗證後重試。"
-                )
-            with urlopen(req, timeout=30, context=make_ssl_context(verify=False)) as resp:
+    last_exc: Exception | None = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            with urlopen(req, timeout=30, context=make_ssl_context(verify=True)) as resp:
                 raw = resp.read()
                 return decode_response_bytes(raw, resp.headers.get("Content-Type"))
-        raise
+        except URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLCertVerificationError) and is_taishin_host(url):
+                if steps is not None:
+                    steps.append("STEP 1.1: 預設 SSL 驗證失敗，對台新官方站啟用受限 fallback：略過憑證驗證後重試。")
+                with urlopen(req, timeout=30, context=make_ssl_context(verify=False)) as resp:
+                    raw = resp.read()
+                    return decode_response_bytes(raw, resp.headers.get("Content-Type"))
+            if isinstance(exc, HTTPError):
+                raise
+            last_exc = exc
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            last_exc = exc
+        # 官網偶發 connection reset，退避後重試。
+        if attempt < RETRY_ATTEMPTS:
+            if steps is not None:
+                steps.append(f"STEP 1.x: 連線失敗（{type(last_exc).__name__}），{2 * attempt} 秒後第 {attempt + 1} 次重試。")
+            time.sleep(2 * attempt)
+    assert last_exc is not None
+    raise last_exc
 
 
 def strip_tags(raw_html: str) -> str:
@@ -260,11 +278,30 @@ def normalize_label_text(text: str) -> str:
     return s.strip()
 
 
-def fetch_disclosure_page(steps: list[str]) -> str:
-    steps.append(f"STEP 1: 從固定入口開始：{ENTRY}")
-    html = request_text(ENTRY, steps=steps)
+def resolve_entry_url(steps: list[str]) -> str:
+    """從法定揭露列表頁找「信用卡金融資訊」的目前連結；找不到就退回既定 ENTRY。"""
+    try:
+        listing = request_text(LISTING_URL, steps=steps)
+    except Exception as exc:
+        steps.append(f"STEP 0: 列表頁無法取得（{type(exc).__name__}），改用既定入口 {ENTRY}")
+        return ENTRY
+    for match in DISCLOSURE_LINK_RE.finditer(listing):
+        text = normalize_label_text(match.group("text"))
+        if text == "信用卡金融資訊":
+            href = match.group("href")
+            url = href if href.startswith("http") else "https://www.taishinbank.com.tw" + href
+            steps.append(f"STEP 0: 列表頁找到信用卡金融資訊連結：{url}")
+            return url
+    steps.append(f"STEP 0: 列表頁沒有「信用卡金融資訊」連結，改用既定入口 {ENTRY}")
+    return ENTRY
+
+
+def fetch_disclosure_page(steps: list[str]) -> tuple[str, str]:
+    entry = resolve_entry_url(steps)
+    steps.append(f"STEP 1: 從入口開始：{entry}")
+    html = request_text(entry, steps=steps)
     steps.append("STEP 2: 已取得台新銀行信用卡金融資訊頁 HTML。")
-    return html
+    return html, entry
 
 
 def extract_data_month(html: str, steps: list[str], fallback_month: str = "") -> tuple[str, str]:
@@ -371,7 +408,7 @@ def main() -> int:
     steps: list[str] = []
 
     try:
-        html = fetch_disclosure_page(steps)
+        html, entry = fetch_disclosure_page(steps)
         data_month, base_date_raw = extract_data_month(html, steps, args.month)
         metrics = extract_metrics(html, steps)
 
@@ -395,7 +432,7 @@ def main() -> int:
         if missing:
             result = build_result(
                 "partial_success" if metrics else "failed",
-                ENTRY,
+                entry,
                 data_month,
                 base_date_raw,
                 metrics,
@@ -406,7 +443,7 @@ def main() -> int:
         else:
             result = build_result(
                 "success",
-                ENTRY,
+                entry,
                 data_month,
                 base_date_raw,
                 metrics,

@@ -60,6 +60,7 @@ SEARCH_ROOTS = [
     WORKSPACE_DIR / "input",
     BASE_DIR / "input",
     WORKSPACE_DIR,
+    BASE_DIR,
 ]
 
 IGNORED_DIR_NAMES = {
@@ -609,9 +610,12 @@ def quick_preview_text(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def packed_month_text(month: str) -> str:
+def packed_month_texts(month: str) -> list[str]:
+    """'115年06月' -> ['11506', '202606']（檔名可能用民國或西元壓縮月份）。"""
     m = re.fullmatch(r"(\d{3})年(\d{2})月", month or "")
-    return f"{m.group(1)}{m.group(2)}" if m else ""
+    if not m:
+        return []
+    return [f"{m.group(1)}{m.group(2)}", f"{int(m.group(1)) + 1911}{m.group(2)}"]
 
 
 def path_hint_score(path: Path, requested_month: str) -> tuple[int, list[str]]:
@@ -637,10 +641,10 @@ def path_hint_score(path: Path, requested_month: str) -> tuple[int, list[str]]:
         if requested_month and requested_month in preview:
             score += 50; hints.append("前段內容符合指定月份")
     if requested_month:
-        packed = packed_month_text(requested_month)
+        name_digits = re.sub(r"\D+", "", normalized_name)
         if requested_month.lower() in normalized_path:
             score += 40; hints.append("檔名含指定月份")
-        elif packed and packed in re.sub(r"\D+", "", normalized_name):
+        elif any(packed in name_digits for packed in packed_month_texts(requested_month)):
             score += 35; hints.append("檔名含壓縮月份")
     return score, hints
 
@@ -745,6 +749,9 @@ def evaluate_candidate(path: Path, requested_month: str, steps: list[str], pre_s
     hints = list(pre_hints or [])
     if data_month:
         hints.append(f"月份={data_month}")
+        if requested_month and data_month != requested_month:
+            # 同資料夾常同時放多個月份的中信檔，月份不符的一律排到指定月份之後。
+            score -= 500; hints.append("月份不符指定月份")
     if has_ctbc_signal(path, text):
         hints.append("含中信/信用卡訊號")
     hints.extend(xlsx_parse_hints)
