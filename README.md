@@ -24,15 +24,17 @@
 
 ## 工作簿結構
 
-- 預設工作簿：`銀行局信用卡公開資料.xlsx`；主要工作表：`歷史資料(年+月)`（單一工作表模型）
-- 前 5 欄：`YYYYMM`、`年度`、`月份`、`Rank`、`Item`
+- 預設工作簿：`銀行局信用卡公開資料*.xlsx`（檔名帶資料區間與日期）；主要工作表：`歷史資料(年+月)`，整張表是 Excel Table `creditcard`
+- 前 7 欄：`YYYYMM`、`年度`、`月份`、`季度`、`排序編號`、`Bank`、`Item`；其中年度/月份/季度是結構化公式（由 `YYYYMM` 推得）
 - 14 個指標欄：流通卡數、有效卡數、當月發卡數、當月停卡數、循環信用餘額、未到期分期付款餘額、當月簽帳金額、
   當月預借現金金額、逾期三個月以上比率、逾期六個月以上比率、備抵呆帳提足率、當月轉銷呆帳金額、
   當年度累計轉銷呆帳金額、當月轉帳卡簽帳金額
 - 衍生欄：`平均每人持卡張數`、`市場總計`、TOP 5 / TOP 10 各種占比欄
-- 每個年月（或年度 Total）固定 **13 列一組**：10 家銀行 → `市場總計(銀行局)` → `銀行局` → `財團法人金融聯合徵信中心`
-- 定位邏輯：先用 `YYYYMM` 找 block，再用 `Item` 找列
-- 年度 block 的 `YYYYMM` 欄放 4 位數年份、`月份` 欄為 `Total`
+- 每個年月（或年度）固定 **11 列一組**：`排序編號` 1–10 為十家銀行、11 為 `市場總計`；`Item` 寫「NN 名稱」（`01 中信`、`11 市場總計`），`Bank` 為簡稱
+- `市場總計` 列承載官方市場總計 13 欄、`平均每人持卡張數`，以及 `市場總計` 與 TOP5/TOP10 占比公式（SUMIFS，`[#This Row]` 結構化參照）
+- 定位邏輯：先用 `YYYYMM` 找 block，再用 `Item`（去前綴）找列；新增 block 時複製上一個 block 的樣式與公式，並延伸 Table 範圍
+- 年度 block 的 `YYYYMM` 欄寫 `YYYY--`（如 `2025--`）
+- block 依新增順序排在表尾，不保證依年月排序；公式以 `YYYYMM` 比對，順序不影響結果
 
 ---
 
@@ -54,17 +56,17 @@
   該年 1–12 月齊全時自動整理年度 block → 重新載入工作簿讀回驗證（輸出 `verification` 段）。
   另有 `--repair-partial-blocks`（刪除表尾孤兒列並回報 `deleted`；表中的只列 `needs_manual_review`）與 `--annual-only`。
   一般月更新前會預掃不完整月 block 並 fail-fast。
-- `Script/run_market_total.py`：金管會 ZIP → 更新 `市場總計(銀行局)` 列與 `銀行局` 列的 `市場總計` 欄；支援 lookback 回補與本機 ZIP。
-- `Script/jcic_avg_cards_update.py`：JCIC CSV → 更新 `財團法人金融聯合徵信中心` 列的 `平均每人持卡張數`；以 `--base-month` 往前回補空白。
+- `Script/run_market_total.py`：金管會 ZIP → 更新 `市場總計` 列的 13 個指標欄（`市場總計` 欄本身是公式，不動）；支援 lookback 回補與本機 ZIP。
+- `Script/jcic_avg_cards_update.py`：JCIC CSV → 更新 `市場總計` 列的 `平均每人持卡張數`；以 `--base-month` 往前回補空白。
 - `Script/run_bank_bureau_bank_backfill.py`：金管會 ZIP → 回補 10 家銀行舊月份空白（13 欄：卡數 4＋金額 6＋比率 3），
-  並修復 `銀行局` 列 Top5/Top10 公式。金額千元→百萬；逾期比率 /100 存小數並套 `0.00%`；13 欄全為必要欄位，缺任一欄該月報錯。
-  回補下限 202601；預設只補空白（`--overwrite` 才覆蓋既有值）。
+  並補齊 `市場總計` 列的 `市場總計`/TOP5/TOP10 公式（從鄰近月份原樣複製）。金額千元→百萬；逾期比率 /100 存小數並套 `0.00%`；13 欄全為必要欄位，缺任一欄該月報錯。
+  回補下限 202601；預設只補空白（`--overwrite` 才覆蓋既有值）。該月 ZIP 未發布（金管會回 404 或導回首頁）時記 `skip_missing_banks`，不建空 block。
 
 ### 共用模組（只在回寫層 import）
 
-- `bank_aliases.py`：銀行別名、`BANK_ORDER`、`ITEM_RANKS`
+- `bank_aliases.py`：銀行別名、`BANK_ORDER`、`BLOCK_ITEMS`/`ITEM_RANKS`（11 列）、Item 標籤與年度鍵工具
 - `percent_utils.py`：百分比正規化（`force_percent_input`）與 `0.00%` 格式
-- `workbook_block_helpers.py`：13 列 block 的尋找 / 建立 / 驗證、列樣式複製、預設字型
+- `workbook_block_helpers.py`：11 列 block 的尋找 / 建立 / 驗證、樣式與公式複製、Table 範圍延伸、Item 標籤正規化
 
 **月 block 只能由 update / backfill 建立**；market 與 jcic 對沒有 block 的月份一律跳過並輸出 `skip_missing_month_block` warning。
 
@@ -155,5 +157,6 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 
 - 預設工作簿是 `信用卡資料彙總.xlsx`，或主要工作表是 `信用卡 / 原始資料(月) / 原始資料(年)`（舊版三表模型已淘汰）
 - 月份在欄、指標在列
+- 每月 13 列、另有 `銀行局` 與 `財團法人金融聯合徵信中心` 兩列（v4 起為 11 列，TOP 公式與 JCIC 值都在 `市場總計` 列）
 - market / jcic 腳本可以替不存在的月份自建列（一律跳過；月 block 只由 update / backfill 建立）
 - 沙箱中可以一次帶 `--banks all` 的完整檔案組合（實需 12+ 檔，改用分組＋`--collect-only`）

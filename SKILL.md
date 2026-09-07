@@ -5,15 +5,16 @@ description: 當使用者要抓取、整理、回補、同步或維護台灣銀�
 
 # Credit Card Disclosure Skill
 
-> 版本 v3.1（2026-09-07）。部署同步檢查：`run_all_banks.py --help` 應有 `--collect-only`，
-> `run_bank_bureau_bank_backfill.py --help` 描述應提到「13 欄」；缺任一項代表部署過期，先提醒使用者。
+> 版本 v4（2026-09-07，11 列 block 版型）。部署同步檢查：`run_all_banks.py --help` 應有 `--collect-only`，
+> `python -c "import bank_aliases as b; print(b.BLOCK_SIZE)"` 應印出 `11`；不符代表部署過期，先提醒使用者。
 
 處理 **台灣銀行信用卡官方揭露資料** 的抓取、彙整、回寫 Excel、舊月份回補與腳本維護。
 
-- 預設工作簿：`銀行局信用卡公開資料.xlsx`（工作區根目錄）；主要工作表：`歷史資料(年+月)`（單一工作表，約 33 欄）
-- 每個年月（或年度 Total）固定 **13 列一組**：10 家銀行 → `市場總計(銀行局)` → `銀行局` → `財團法人金融聯合徵信中心`
-- `Rank`：銀行列 1–10、`市場總計(銀行局)`=11、`銀行局`=12、`財團法人金融聯合徵信中心`=13
-- 定位方式：先找 `YYYYMM` block，再用 `Item` 找列
+- 預設工作簿：`銀行局信用卡公開資料*.xlsx`（工作區根目錄，檔名帶資料區間如 `_2015-202606_20260907`）；主要工作表：`歷史資料(年+月)`（35 欄的 Excel Table `creditcard`）
+- 每個年月（或年度 `YYYY--`）固定 **11 列一組**：`排序編號` 1–10 為十家銀行、11 為 `市場總計`
+- `Item` 欄寫法為「NN 名稱」（`01 中信` … `11 市場總計`），`Bank` 欄為簡稱；`年度`/`月份`/`季度` 是 Table 結構化公式，不要寫值
+- `市場總計` 列同時承載官方市場總計 13 欄、`平均每人持卡張數`（JCIC）、`市場總計` 與 TOP5/TOP10 占比公式
+- 定位方式：先找 `YYYYMM` block，再用 `Item`（去掉前綴後）找列
 
 ---
 
@@ -75,7 +76,8 @@ input_files（9 個）：`creditcardinfo/Script/update_credit_card_workbook.py`�
 （若 summary 裡 ctbc 缺「當月轉帳卡簽帳金額」，再多帶第 10 個檔 `中信信用卡資料.xlsx`）
 
 不帶 `--month` 時腳本自動取各行 `data_month` 最新月為 target；內部順序固定：
-**寫入最新月 block → 銀行局 backfill（補日曆缺口與舊月空白、修 Top5/Top10 公式）→ 市場總計 → JCIC → 年度整理（該年 1–12 月齊全才觸發）**。
+**寫入最新月 block → 銀行局 backfill（補日曆缺口與舊月空白、補市場總計列公式）→ 市場總計 → JCIC → 年度整理（該年 1–12 月齊全才觸發）**。
+官網最新月通常領先金管會 ZIP 一個月：該月 ZIP 未發布時 backfill 記 `skip_missing_banks`、市場總計改用最新可得月，屬正常。
 
 **判讀結果（看步驟 5 的 stdout JSON，不要自己寫 openpyxl 驗證）**
 - `verification.status == "ok"` → 成功；`"mismatch"` → 列出 `mismatches` 回報使用者
@@ -138,9 +140,9 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 | `cathay` `esun` `taishin` `ubot` `sinopac` `feib` `_...py` | 官網 HTML / API | `--month` | 自動 fallback | 自身 |
 | `firstbank_...py` | 官網 HTML（內建重試最長 ~170s） | `--month` `--allow-insecure` `--retries` `--timeout` | 第三段需 `--allow-insecure` | 自身 |
 | `update_credit_card_workbook.py` | 主控：寫月 block＋委派＋年度整理＋讀回驗證 | `--workbook` `--summary` `--month` `--repair-partial-blocks` `--annual-only`（`--skip-*` 平常不要用） | 不上網 | 自身＋3 委派腳本＋3 共用模組＋summary＋工作簿 |
-| `run_market_total.py` | 金管會 ZIP → `市場總計(銀行局)`＋`銀行局.市場總計` | `--workbook` `--base-month` `--lookback-months` `--zip-file` | 自動 fallback | 自身＋`percent_utils.py`＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
-| `jcic_avg_cards_update.py` | JCIC CSV → `平均每人持卡張數` | `--workbook` `--base-month`（必填） `--backfill-months` | 自動 fallback | 自身＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
-| `run_bank_bureau_bank_backfill.py` | 金管會 ZIP → 補舊月 10 行空白（13 欄）＋修公式 | `--workbook` `--month` / `--newest-month` `--lookback-months` | 自動 fallback | 自身＋3 共用模組＋工作簿 |
+| `run_market_total.py` | 金管會 ZIP → `市場總計` 列 13 欄 | `--workbook` `--base-month` `--lookback-months` `--zip-file` | 自動 fallback | 自身＋`percent_utils.py`＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
+| `jcic_avg_cards_update.py` | JCIC CSV → `市場總計` 列的 `平均每人持卡張數` | `--workbook` `--base-month`（必填） `--backfill-months` | 自動 fallback | 自身＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
+| `run_bank_bureau_bank_backfill.py` | 金管會 ZIP → 補舊月 10 行空白（13 欄）＋補市場總計列公式 | `--workbook` `--month` / `--newest-month` `--lookback-months` | 自動 fallback | 自身＋3 共用模組＋工作簿 |
 
 共用模組（不可執行）：`percent_utils.py`、`bank_aliases.py`、`workbook_block_helpers.py`。
 **月 block 只由 update / backfill 建立**；market 與 jcic 對不存在的月份一律跳過並回報 warning。
@@ -160,7 +162,7 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
    若仍遇到「Refusing to overwrite ... .pyc」，先清空 `creditcardinfo/Script/__pycache__/`。
 3. **cwd 不是 repo root**：一律用 repo-relative 路徑（`creditcardinfo/Script/xxx.py`）。
 4. **不要自己直連下載金管會 ZIP / JCIC CSV**：URL quote、憑證、未發布月回 HTML 等問題腳本都處理好了。
-5. **結果判讀看 stdout JSON 的 `verification` 段**：不要手寫 openpyxl 逐格驗證；真要抽查只讀目標 `YYYYMM` 的 13 列。
+5. **結果判讀看 stdout JSON 的 `verification` 段**：不要手寫 openpyxl 逐格驗證；真要抽查只讀目標 `YYYYMM` 的 11 列。
 6. **多月份 data_month 不是錯誤**：update 取最新月為 target，落後銀行列進 `warnings` 留給 backfill。
 7. **timeout 數學**：run_all 循序執行，總時間 ≈ 銀行數 × `--timeout`，不可超過工具的 900 秒上限。
 
@@ -168,8 +170,10 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 
 ## 資料模型關鍵事實（判讀 / 改碼時用）
 
-- `市場總計(銀行局)`＝回寫結果列；`銀行局`＝公式列（Top5/Top10，要用腳本修復）；`財團法人金融聯合徵信中心`＝JCIC 補值列
-- 年度 block 的 `YYYYMM` 欄放 4 位數年份、`月份` 欄為 `Total`；年度整理只在該年 1–12 月齊全時自動觸發
+- `市場總計` 列的 `市場總計` 欄與 12 個 TOP 欄是公式（SUMIFS 用 `[#This Row]` 結構化參照），新 block 由腳本從上一個 block 原樣複製，不要手動貼值
+- 新增列後腳本會把 Table `creditcard` 的範圍延伸到最後一列；若手動加列務必同步延伸，否則 `年度`/`月份` 公式不會自動填
+- 年度 block 的 `YYYYMM` 欄寫 `YYYY--`（如 `2025--`），年度整理只在該年 1–12 月齊全時自動觸發
+- block 依新增順序排在表尾，不保證按年月排序（公式以 `YYYYMM` 比對，順序不影響結果）
 - **百分比欄單位鐵則**：JSON 與工作簿內部一律存**小數比率**，Excel 靠 `0.00%` 格式顯示。
   逾期三/六個月比率的來源都是百分比顯示數字（`0.12` 代表 0.12%）→ 解析時**一律 /100**（`force_percent_input=True`）；
   唯一例外是儲存格本身是 % 格式（如中信 xlsx raw `0.0012`）→ 直接保留。中信腳本這兩欄在解析階段已轉小數，
