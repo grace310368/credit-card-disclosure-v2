@@ -10,7 +10,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -592,23 +591,6 @@ def build_index_map(ws) -> dict[str, int]:
     return index_map
 
 
-def copy_row_style(ws, src_row: int, dst_row: int) -> None:
-    for column in range(1, ws.max_column + 1):
-        src = ws.cell(src_row, column)
-        dst = ws.cell(dst_row, column)
-        if src.has_style:
-            dst._style = copy(src._style)
-        dst.font = copy(src.font)
-        dst.fill = copy(src.fill)
-        dst.border = copy(src.border)
-        dst.alignment = copy(src.alignment)
-        dst.protection = copy(src.protection)
-        dst.number_format = src.number_format
-    if src_row in ws.row_dimensions:
-        ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
-        ws.row_dimensions[dst_row].hidden = ws.row_dimensions[src_row].hidden
-
-
 def build_month_item_rows(ws, index_map: dict[str, int]) -> dict[tuple[int, str], int]:
     mapping: dict[tuple[int, str], int] = {}
     yyyymm_col = index_map['yyyymm']
@@ -636,14 +618,12 @@ def set_month_item_metadata(ws, row_no: int, index_map: dict[str, int], *, ad_yy
     set_row_value_if_present(ws, row_no, index_map, 'item', item)
 
 
-def ensure_special_item_row(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], ad_yyyymm: int, ad_year: int, month_number: int, item: str) -> tuple[int | None, bool]:
-    key = (ad_yyyymm, item)
-    row_no = row_map.get(key)
+def find_special_item_row(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], ad_yyyymm: int, ad_year: int, month_number: int, item: str) -> int | None:
+    """回傳既有月 block 中該 Item 的列號；月 block 不存在時回傳 None（不自建列）。"""
+    row_no = row_map.get((ad_yyyymm, item))
     if row_no is not None:
         set_month_item_metadata(ws, row_no, index_map, ad_yyyymm=ad_yyyymm, ad_year=ad_year, month_number=month_number, rank=ITEM_RANKS.get(item), item=item)
-        return row_no, False
-
-    return None, False
+    return row_no
 
 
 def row_has_any_blank_metric(ws, row_no: int, index_map: dict[str, int], fields: list[str]) -> bool:
@@ -695,13 +675,12 @@ def write_bank_bureau_row(ws, row_no: int, index_map: dict[str, int], market: di
     return {'written': written, 'skipped_existing': skipped_existing}
 
 
-def build_result(action: str, market: dict[str, Any], write_result: dict[str, Any], *, row_no: int, item: str, row_created: bool) -> dict[str, Any]:
+def build_result(action: str, market: dict[str, Any], write_result: dict[str, Any], *, row_no: int, item: str) -> dict[str, Any]:
     return {
         'month': market['month'],
         'ad_yyyymm': market['ad_yyyymm'],
         'row': row_no,
         'item': item,
-        'row_created': row_created,
         'source_url': market.get('source_url'),
         'source_kind': market.get('source_kind'),
         'local_zip_path': market.get('local_zip_path'),
@@ -826,7 +805,7 @@ def main() -> None:
             continue
         processed_actual_months.add(actual_yyyymm)
 
-        market_row_no, market_row_created = ensure_special_item_row(
+        market_row_no = find_special_item_row(
             ws,
             index_map,
             row_map,
@@ -835,7 +814,7 @@ def main() -> None:
             market['month_number'],
             MARKET_TOTAL_ITEM,
         )
-        bank_bureau_row_no, bank_bureau_row_created = ensure_special_item_row(
+        bank_bureau_row_no = find_special_item_row(
             ws,
             index_map,
             row_map,
@@ -867,7 +846,6 @@ def main() -> None:
                 write_market_total_row(ws, market_row_no, index_map, market, overwrite=args.overwrite),
                 row_no=market_row_no,
                 item=MARKET_TOTAL_ITEM,
-                row_created=market_row_created,
             )
         )
         results.append(
@@ -877,7 +855,6 @@ def main() -> None:
                 write_bank_bureau_row(ws, bank_bureau_row_no, index_map, market, overwrite=args.overwrite),
                 row_no=bank_bureau_row_no,
                 item=BANK_BUREAU_ITEM,
-                row_created=bank_bureau_row_created,
             )
         )
 

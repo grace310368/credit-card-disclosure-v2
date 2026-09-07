@@ -12,14 +12,6 @@ def apply_default_font(cell, font_name: str = DEFAULT_FONT_NAME) -> None:
     cell.font = new_font
 
 
-def apply_default_font_to_row(ws, row_no: int, *, start_column: int = 1, end_column: int | None = None, font_name: str = DEFAULT_FONT_NAME) -> None:
-    if end_column is None:
-        end_column = ws.max_column
-    for column in range(start_column, end_column + 1):
-        cell = ws.cell(row_no, column)
-        apply_default_font(cell, font_name=font_name)
-
-
 def canonical_block_item(
     value: Any,
     *,

@@ -18,10 +18,6 @@ try:
 except Exception:  # pragma: no cover - handled at runtime
     PdfReader = None  # type: ignore[assignment]
 
-# -----------------------
-# Inline replacements for common/*
-# -----------------------
-
 
 def configure_utf8_stdio() -> None:
     """Ensure UTF-8 stdout/stderr on Windows / various terminals."""
@@ -41,11 +37,8 @@ BANK_NAME = "星展銀行"
 ENTRY = "https://www.dbs.com.tw/treasures-zh/accessibility/announcement-personal.html"
 
 # 星展這支腳本由官網 PDF 抽取信用卡業務暨財務資訊。
-# 目的：抓取資料並正式紀錄來源單位，不在子腳本階段轉成百萬元。
-# 後續跨銀行比較時，建議由 run_all_banks.py 依 metric_units 統一轉為百萬元。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
-AMOUNT_UNIT_NORMALIZED = False
 
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -131,14 +124,7 @@ def now_iso() -> str:
 
 
 def normalize_month_text(text: str) -> str:
-    """
-    Normalize month text into ROC year format: '115年04月'.
-    Supported inputs:
-      - '115/4', '115/04', '115-4', '115年4月', '民國115年4月'
-      - '2026/04', '2026-4', '2026年4月'
-      - '115/05/31' -> '115年05月'
-    If cannot parse, return ''.
-    """
+    """月份文字正規化為民國格式（如 115年05月）；無法解析回傳空字串。"""
     if not text:
         return ""
 
@@ -168,10 +154,7 @@ def normalize_month_text(text: str) -> str:
 
 
 def normalize_value(value_text: str) -> dict:
-    """
-    只清洗數字，不進行單位換算。
-    單位會由 build_result() 輸出的 source_amount_unit / metric_units 正式紀錄。
-    """
+    """清洗數值文字（去千分位、單位、貨幣符號），不做單位換算；回傳 {"ok", "normalized"}。"""
     if value_text is None:
         return {"ok": False, "normalized": ""}
 
@@ -373,16 +356,7 @@ def build_result(
         "status": status,
         "data_month": data_month,
         "base_date": base_date,
-
-        # ===== 單位紀錄 =====
-        # source_amount_unit：本銀行來源金額單位。
-        # metric_units：各 metrics 欄位對應來源單位。
-        # amount_unit_normalized：False 表示本子腳本只紀錄來源單位，尚未轉成百萬元。
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": AMOUNT_UNIT_NORMALIZED,
-        "unit_note": "本腳本保留星展來源 PDF 單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics,
         "source": {
             "source_type": "pdf",

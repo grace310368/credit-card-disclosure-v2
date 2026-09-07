@@ -19,14 +19,12 @@ sys.dont_write_bytecode = True
 from bank_aliases import BANK_ITEM_ALIASES, ITEM_RANKS
 from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
 from workbook_block_helpers import (
-    append_month_block as shared_append_month_block,
     canonical_block_item as shared_canonical_block_item,
     copy_row_style as shared_copy_row_style,
     find_month_block as shared_find_month_block,
     find_or_create_month_block as shared_find_or_create_month_block,
     refresh_block_metadata as shared_refresh_block_metadata,
     set_block_row_metadata as shared_set_block_row_metadata,
-    set_row_value_if_present as shared_set_row_value_if_present,
     validate_block_items as shared_validate_block_items,
     apply_default_font,
 )
@@ -389,7 +387,7 @@ def merged_record(rec: dict[str, Any]) -> dict[str, Any]:
 
 def load_summary_results(summary_path: Path, allow_partial: bool = False) -> dict[str, dict[str, Any]]:
     if summary_path.suffix.lower() != ".json":
-        raise ValueError(f"--summary 目前應提供 JSON 檔，不再讀取 xlsx：{summary_path}")
+        raise ValueError(f"--summary 必須是 JSON 檔：{summary_path}")
     with summary_path.open("r", encoding="utf-8-sig") as handle:
         payload = json.load(handle)
 
@@ -494,8 +492,7 @@ def infer_target_month_from_results(results: dict[str, dict[str, Any]]) -> str:
         months.add(parse_roc_month(str(data_month)))
     if not months:
         raise ValueError("summary JSON 中找不到可推定 target month 的 data_month")
-    # 各家銀行公布時間不同，可能出現多個月份。取「最新月」為 target，
-    # 其餘落後月份留給 backfill 處理，而不是直接報錯中止整條流程。
+    # 各家銀行公布時間不同，取最新月為 target，落後月份留給 backfill。
     year, month = max(months)
     return roc_month_text(year, month)
 
@@ -508,20 +505,8 @@ def determine_backfill_base_month(target_month: str | None, results: dict[str, d
     return None
 
 
-def build_block_header_values(ad_year_value: int, month_number: int) -> dict[str, Any]:
-    return {
-        "yyyymm": ad_year_value * 100 + month_number,
-        "ad_year": ad_year_value,
-        "month_number": month_number,
-    }
-
-
 def copy_row_style(ws, src_row: int, dst_row: int) -> None:
     shared_copy_row_style(ws, src_row, dst_row)
-
-
-def set_row_value_if_present(ws, row_no: int, index_map: dict[str, int], field: str, value: Any) -> None:
-    shared_set_row_value_if_present(ws, row_no, index_map, field, value)
 
 
 def set_block_row_metadata(ws, row_no: int, index_map: dict[str, int], *, yyyymm: int, ad_year: int, month_number: int | str, rank: int | None, item: str) -> None:
@@ -531,33 +516,14 @@ def set_block_row_metadata(ws, row_no: int, index_map: dict[str, int], *, yyyymm
 
 
 def validate_block_items(ws, index_map: dict[str, int], rows: list[int], yyyymm: int) -> dict[str, int]:
-    if len(rows) != BLOCK_SIZE:
-        raise ValueError(f"YYYYMM={yyyymm} 的 block 列數不是 {BLOCK_SIZE}：實際 {len(rows)} 列")
-    expected_rows = list(range(rows[0], rows[0] + BLOCK_SIZE))
-    if rows != expected_rows:
-        raise ValueError(f"YYYYMM={yyyymm} 的 block 不是連續 {BLOCK_SIZE} 列：{rows}")
-
-    item_to_row: dict[str, int] = {}
-    for offset, expected_item in enumerate(BLOCK_ITEMS):
-        row_no = rows[offset]
-        actual_item = canonical_block_item(ws.cell(row_no, index_map["item"]).value)
-        if actual_item != expected_item:
-            raise ValueError(
-                f"YYYYMM={yyyymm} 的 block Item 不符合固定模板：row {row_no} 預期 {expected_item!r}，實際 {ws.cell(row_no, index_map["item"]).value!r}"
-            )
-        item_to_row[expected_item] = row_no
-    return item_to_row
+    return shared_validate_block_items(
+        ws, index_map, rows, yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='block '
+    )
 
 
 def find_month_block(ws, index_map: dict[str, int], yyyymm: int) -> dict[str, Any] | None:
     return shared_find_month_block(
         ws, index_map, yyyymm, normalize_yyyymm=normalize_yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='block '
-    )
-
-
-def append_month_block(ws, index_map: dict[str, int], ad_year: int, month_number: int) -> dict[str, Any]:
-    return shared_append_month_block(
-        ws, index_map, ad_year=ad_year, month_number=month_number, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS
     )
 
 
@@ -816,10 +782,7 @@ def get_cell_numeric(ws, row_no: int, index_map: dict[str, int], field: str) -> 
 
 
 def year_completeness_report(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any]:
-    # 年度完整性規則：
-    # 1) 同一年 1–12 月 block 必須都存在
-    # 2) 年度整理需要的關鍵月資料欄位不可為空
-    # 這個檢查只服務於主控腳本的年度同步，不是各腳本都要各自複製的邏輯。
+    # 年度完整性：同一年 1–12 月 block 都存在，且年度整理需要的月資料欄位不可為空。
     month_blocks = monthly_blocks_by_year(ws, index_map, ad_year_value)
     missing_months = [month for month in range(1, 13) if month not in month_blocks]
     missing_details: list[dict[str, Any]] = []
@@ -1263,8 +1226,6 @@ def run_jcic_script(args, workbook_path: Path, base_month: str) -> dict[str, Any
         cmd.extend(["--source-url", args.jcic_source_url])
     if args.jcic_label:
         cmd.extend(["--label", args.jcic_label])
-    if args.jcic_target_row is not None:
-        cmd.extend(["--target-row", str(args.jcic_target_row)])
     if args.jcic_overwrite:
         cmd.append("--overwrite")
     if args.jcic_insecure:
@@ -1372,7 +1333,7 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="更新銀行局信用卡公開資料.xlsx：以 summary JSON 寫入『歷史資料(年+月)』月 block，並可委派市場總計、JCIC 與銀行局回補腳本；其中 JCIC 的 --jcic-target-row 僅供相容舊參數，新格式下不參與定位"
+        description="更新銀行局信用卡公開資料.xlsx：以 summary JSON 寫入『歷史資料(年+月)』月 block，並委派市場總計、JCIC 與銀行局回補腳本"
     )
     parser.add_argument("--workbook", default=WORKBOOK_DEFAULT, help="Excel 檔案路徑，預設：銀行局信用卡公開資料.xlsx")
     parser.add_argument("--summary", default="", help="run_all_banks.py 產出的 JSON 檔；一般月更新模式必填")
@@ -1397,7 +1358,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jcic-entry-url", default="", help="委派 jcic_avg_cards_update.py 時加上 --entry-url")
     parser.add_argument("--jcic-source-url", default="", help="委派 jcic_avg_cards_update.py 時加上 --source-url")
     parser.add_argument("--jcic-label", default="平均每人持卡張數", help="委派 jcic_avg_cards_update.py 時加上 --label")
-    parser.add_argument("--jcic-target-row", type=int, default=18, help="委派 jcic_avg_cards_update.py 時加上 --target-row；相容舊參數，新格式下不參與定位")
     parser.add_argument("--jcic-backfill-months", type=int, default=24, help="委派 jcic_avg_cards_update.py 時往前回補空白時最多檢查幾個月份，預設 24")
     parser.add_argument("--jcic-overwrite", action="store_true", help="委派 jcic_avg_cards_update.py 時加上 --overwrite")
     parser.add_argument("--jcic-insecure", action="store_true", help="委派 jcic_avg_cards_update.py 時加上 --insecure")
@@ -1422,8 +1382,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_utf8_stdio()
     args = build_parser().parse_args()
-
-    # annual-only mode is supported below
 
     workbook_path = Path(args.workbook)
     if not workbook_path.exists():

@@ -12,10 +12,6 @@ from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-# -----------------------
-# Inline replacements for common/*
-# -----------------------
-
 
 def configure_utf8_stdio() -> None:
     """Ensure UTF-8 stdout/stderr on Windows / various terminals."""
@@ -28,14 +24,7 @@ def configure_utf8_stdio() -> None:
 
 
 def normalize_month_text(text: str) -> str:
-    """
-    Normalize month text into ROC year format: '115年05月'
-    Supported inputs:
-      - '115/5', '115/05', '115-5', '115年5月', '民國115年5月'
-      - '2026/05', '2026-5', '2026年5月'
-      - '115年度5月業務資訊', '2026年度5月業務資訊'
-    If cannot parse, return ''.
-    """
+    """月份文字正規化為民國格式（如 115年05月）；無法解析回傳空字串。"""
     if not text:
         return ""
 
@@ -45,11 +34,9 @@ def normalize_month_text(text: str) -> str:
     # Example: 115年度5月業務資訊 / 2026年度5月業務資訊
     m = re.search(r"(?P<y>\d{3,4})\s*年度\s*(?P<m>\d{1,2})\s*月", s)
     if not m:
-        # Examples: 115/5, 115-05, 115年5月, 2026/5
         m = re.search(r"(?P<y>\d{3,4})\s*[\/\-.年]\s*(?P<m>\d{1,2})", s)
 
     if not m:
-        # Packed forms like 202605 / 11505
         m2 = re.search(r"(?P<y>\d{3,4})\s*(?P<m>\d{2})\b", s)
         if not m2:
             return ""
@@ -72,15 +59,7 @@ def normalize_month_text(text: str) -> str:
 
 
 def normalize_value(value_text: str) -> dict:
-    """
-    Parse a value cell text like:
-      '7,468,338.00', '72,762,612.00仟元', '21,799,619.00仟元', '—'
-    Return:
-      {'ok': bool, 'normalized': str}
-
-    注意：本函式只清洗數字，不進行單位換算。
-    單位由 build_result() 輸出的 metric_units / source_amount_unit 正式紀錄。
-    """
+    """清洗數值文字（去千分位、單位、貨幣符號），不做單位換算；回傳 {"ok", "normalized"}。"""
     if value_text is None:
         return {"ok": False, "normalized": ""}
 
@@ -124,17 +103,11 @@ def normalize_value(value_text: str) -> dict:
 
 configure_utf8_stdio()
 
-# -----------------------
-# Bank configuration
-# -----------------------
-
 BANK_KEY = "cathay"
 BANK_NAME = "國泰世華銀行"
 ENTRY = "https://www.cathaybk.com.tw/cathaybk/personal/about/brand/legal-disclosure/"
 
 # 國泰世華信用卡公開揭露頁面，金額欄位目前依腳本欄位與清洗邏輯視為「仟元」。
-# 本腳本的定位：只抓取資料並正式紀錄來源單位，不在子腳本階段轉換為百萬元。
-# 若後續要跨銀行比較，建議由 run_all_banks.py 主控腳本依 metric_units 統一轉為百萬元。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
 
@@ -178,8 +151,6 @@ NORMALIZED_TARGET_LABELS = {
     unicodedata.normalize("NFKC", key).replace(" ", ""): value
     for key, value in TARGET_LABELS.items()
 }
-
-# 正式紀錄各欄位來源單位。
 # 同時保留 canonical key 與現行 metrics key，方便 run_all_banks.py 或下游流程讀取。
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -347,16 +318,7 @@ def build_result(
         "status": status,
         "data_month": data_month,
         "base_date": base_date,
-
-        # ===== 單位紀錄 =====
-        # source_amount_unit：本銀行來源金額單位。
-        # metric_units：各 metrics 欄位對應來源單位。
-        # amount_unit_normalized：False 表示本子腳本只紀錄來源單位，尚未轉成百萬元。
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": False,
-        "unit_note": "本腳本保留國泰世華來源單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics,
         "source": {
             "source_type": "html",

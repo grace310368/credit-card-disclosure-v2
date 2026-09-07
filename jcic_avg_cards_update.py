@@ -11,7 +11,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,6 @@ DEFAULT_ENTRY_URL = 'https://www.jcic.org.tw/main_ch/download_page.aspx?uid=213&
 DEFAULT_SOURCE_URL = 'https://www.jcic.org.tw/main_ch/fileRename/fileRename.aspx?uid=213&fid=910&kid=4'
 TARGET_LABEL = '平均每人持卡張數'
 SOURCE_HEADER_KEY = '信用卡平均每戶持卡張數'
-DEFAULT_TARGET_ROW = 18
 DEFAULT_SHEET_NAME = '歷史資料(年+月)'
 TARGET_ITEM = '財團法人金融聯合徵信中心'
 TARGET_FID = '910'
@@ -58,7 +56,7 @@ def configure_utf8_stdio() -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description='抓取 JCIC 平均每人持卡張數 CSV，依 base month 往前回補 銀行局信用卡公開資料.xlsx 的空白欄位；--target-row 僅供相容舊參數，新格式下不參與定位。'
+        description='抓取 JCIC 平均每人持卡張數 CSV，依 base month 往前回補 銀行局信用卡公開資料.xlsx 的空白欄位。'
     )
     p.add_argument('--workbook', default=str(DEFAULT_WORKBOOK), help='目標 Excel 檔，預設為 銀行局信用卡公開資料.xlsx')
     p.add_argument('--sheet', default=DEFAULT_SHEET_NAME, help='目標工作表名稱，預設為 歷史資料(年+月)')
@@ -67,7 +65,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--base-month', required=True, help='以指定月份為基期，往前檢查 --backfill-months 個月份的空白/缺列後回補，例如 115年05月')
     p.add_argument('--backfill-months', type=int, default=24, help='搭配 --base-month 使用，從基期月份起最多往前檢查幾個月份（含基期），預設 24')
     p.add_argument('--label', default=TARGET_LABEL, help='目標欄位名稱，預設為 平均每人持卡張數')
-    p.add_argument('--target-row', type=int, default=DEFAULT_TARGET_ROW, help='相容舊參數，僅供舊流程保留；新版 block 定位不使用')
     p.add_argument('--overwrite', action='store_true', help='若指定，會覆蓋既有資料；預設只補空白')
     p.add_argument('--insecure', action='store_true', help='若公司環境 SSL 憑證驗證失敗，可加此參數略過憑證驗證')
     return p.parse_args()
@@ -185,23 +182,6 @@ def build_index_map(ws) -> dict[str, int]:
     return index_map
 
 
-def copy_row_style(ws, src_row: int, dst_row: int) -> None:
-    for column in range(1, ws.max_column + 1):
-        src = ws.cell(src_row, column)
-        dst = ws.cell(dst_row, column)
-        if src.has_style:
-            dst._style = copy(src._style)
-        dst.font = copy(src.font)
-        dst.fill = copy(src.fill)
-        dst.border = copy(src.border)
-        dst.alignment = copy(src.alignment)
-        dst.protection = copy(src.protection)
-        dst.number_format = src.number_format
-    if src_row in ws.row_dimensions:
-        ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
-        ws.row_dimensions[dst_row].hidden = ws.row_dimensions[src_row].hidden
-
-
 def build_month_item_rows(ws, index_map: dict[str, int]) -> dict[tuple[int, str], int]:
     mapping: dict[tuple[int, str], int] = {}
     yyyymm_col = index_map['yyyymm']
@@ -233,13 +213,12 @@ def set_row_metadata(ws, row_no: int, index_map: dict[str, int], *, ad_yyyymm: i
     set_row_value_if_present(ws, row_no, index_map, 'item', item)
 
 
-def ensure_target_row(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], ad_yyyymm: int, ad_year: int, month_number: int) -> tuple[int, bool]:
-    key = (ad_yyyymm, TARGET_ITEM)
-    row_no = row_map.get(key)
+def require_target_row(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], ad_yyyymm: int, ad_year: int, month_number: int) -> int:
+    row_no = row_map.get((ad_yyyymm, TARGET_ITEM))
     if row_no is None:
         raise ValueError(f'YYYYMM={ad_yyyymm} 在工作簿中沒有月 block，拒絕單獨建立 JCIC 列；請先由 update_credit_card_workbook.py 或 run_bank_bureau_bank_backfill.py 建立該月 13 列 block')
     set_row_metadata(ws, row_no, index_map, ad_yyyymm=ad_yyyymm, ad_year=ad_year, month_number=month_number, item=TARGET_ITEM)
-    return row_no, False
+    return row_no
 
 
 def resolve_source_url(entry_url: str, fallback_url: str, insecure: bool = False) -> tuple[str, str]:
@@ -372,7 +351,7 @@ def pending_months_from_base(ws, index_map: dict[str, int], row_map: dict[tuple[
 def write_single_month(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], item: dict[str, Any], overwrite: bool) -> dict[str, Any]:
     ad_yyyymm = int(item['ad_yyyymm'])
     ad_year, month_number = divmod(ad_yyyymm, 100)
-    row_no, row_inserted = ensure_target_row(ws, index_map, row_map, ad_yyyymm, ad_year, month_number)
+    row_no = require_target_row(ws, index_map, row_map, ad_yyyymm, ad_year, month_number)
     value_col = index_map['avg_cards_per_person']
     cell = ws.cell(row_no, value_col)
     before = cell.value
@@ -387,7 +366,6 @@ def write_single_month(ws, index_map: dict[str, int], row_map: dict[tuple[int, s
         'month': item['month'],
         'ad_yyyymm': ad_yyyymm,
         'row': row_no,
-        'row_inserted': row_inserted,
         'before_value': before,
         'written_value': ws.cell(row_no, value_col).value,
         'action': action,

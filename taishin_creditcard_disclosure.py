@@ -13,10 +13,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-# -----------------------
-# Inline replacements for common/*
-# -----------------------
-
 
 def configure_utf8_stdio() -> None:
     """Ensure UTF-8 stdout/stderr on Windows / various terminals."""
@@ -29,14 +25,7 @@ def configure_utf8_stdio() -> None:
 
 
 def normalize_month_text(text: str) -> str:
-    """
-    Normalize month text into ROC year format: '115年05月'
-    Supported inputs:
-      - '115/5', '115/05', '115-5', '115年5月', '民國115年5月'
-      - '2026/05', '2026-5', '2026年5月'
-      - '2026/05/29' -> 115年05月
-    If cannot parse, return ''.
-    """
+    """月份文字正規化為民國格式（如 115年05月）；無法解析回傳空字串。"""
     if not text:
         return ""
 
@@ -57,8 +46,6 @@ def normalize_month_text(text: str) -> str:
 
     if not (1 <= mm <= 12):
         return ""
-
-    # Convert AD year to ROC year if needed
     if y >= 1911:
         y = y - 1911
 
@@ -69,15 +56,7 @@ def normalize_month_text(text: str) -> str:
 
 
 def normalize_value(value_text: str) -> dict:
-    """
-    Parse a value cell text like:
-      '6,667,146卡', '46,674,349仟元', '0.21%', '—'
-    Return:
-      {"ok": bool, "normalized": str}
-
-    注意：本函式只清洗數字，不進行單位換算。
-    單位由 build_result() 輸出的 source_amount_unit / metric_units 正式紀錄。
-    """
+    """清洗數值文字（去千分位、單位、貨幣符號），不做單位換算；回傳 {"ok", "normalized"}。"""
     if value_text is None:
         return {"ok": False, "normalized": ""}
 
@@ -88,7 +67,6 @@ def normalize_value(value_text: str) -> dict:
     if s in {"—", "-", "－", "–", "N/A", "NA", "n/a"}:
         return {"ok": False, "normalized": ""}
 
-    # 僅移除顯示用單位文字，不做單位換算。
     s = s.replace("卡", "")
     s = s.replace("仟元", "")
     s = s.replace("千元", "")
@@ -122,21 +100,14 @@ def normalize_value(value_text: str) -> dict:
 
 configure_utf8_stdio()
 
-# -----------------------
-# Bank configuration
-# -----------------------
-
 BANK_KEY = "taishin"
 BANK_NAME = "台新銀行"
 
 ENTRY = "https://www.taishinbank.com.tw/TSB/personal/common/legal-disclaimers/TSBankPublicDisclosure-000263/"
 
 # 台新銀行這支腳本由官網 HTML 抽取信用卡金融資訊。
-# 目的：抓取資料並正式紀錄來源單位，不在子腳本階段轉成百萬元。
-# 後續跨銀行比較時，建議由 run_all_banks.py 依 metric_units 統一轉為百萬元。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
-AMOUNT_UNIT_NORMALIZED = False
 
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -375,16 +346,7 @@ def build_result(
         "status": status,
         "data_month": data_month,
         "base_date": base_date,
-
-        # ===== 單位紀錄 =====
-        # source_amount_unit：本銀行來源金額單位。
-        # metric_units：各 metrics 欄位對應來源單位。
-        # amount_unit_normalized：False 表示本子腳本只紀錄來源單位，尚未轉成百萬元。
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": AMOUNT_UNIT_NORMALIZED,
-        "unit_note": "本腳本保留台新銀行來源 HTML 單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics,
         "source": {
             "source_type": "html",

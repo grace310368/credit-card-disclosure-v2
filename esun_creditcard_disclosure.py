@@ -13,10 +13,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
-# -----------------------
-# Inline replacements for common/*
-# -----------------------
-
 
 def configure_utf8_stdio() -> None:
     """Ensure UTF-8 stdout/stderr on Windows / various terminals."""
@@ -25,29 +21,18 @@ def configure_utf8_stdio() -> None:
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
-            # If it fails, just ignore; printing may still work.
             pass
 
 
 def normalize_month_text(text: str) -> str:
-    """
-    Normalize month text into ROC year format: '115年04月'
-    Supported inputs:
-      - '115/4', '115/04', '115-4', '115年4月', '民國115年4月'
-      - '2026/04', '2026-4', '2026年4月'
-      - '115/4' (as seen in 資料基期：115/4)
-    If cannot parse, return ''.
-    """
+    """月份文字正規化為民國格式（如 115年05月）；無法解析回傳空字串。"""
     if not text:
         return ""
 
     s = str(text).strip()
     s = s.replace("民國", "").strip()
-
-    # Try patterns: YYYY/MM, YYY/MM, YYYY年M月, YYY年M月, YYYY.M, etc.
     m = re.search(r"(?P<y>\d{3,4})\s*[\/\-.年]\s*(?P<m>\d{1,2})", s)
     if not m:
-        # Try 'YYYYMM' or 'YYYMM' packed
         m2 = re.search(r"(?P<y>\d{3,4})\s*(?P<m>\d{2})\b", s)
         if not m2:
             return ""
@@ -59,13 +44,8 @@ def normalize_month_text(text: str) -> str:
 
     if not (1 <= mm <= 12):
         return ""
-
-    # Convert AD year to ROC year if needed
-    # ROC 115 == AD 2026
     if y >= 1911:
         y = y - 1911
-
-    # Heuristic: treat 3-digit years as ROC (e.g., 115), 4-digit small (<1911) unlikely.
     if y <= 0 or y > 300:
         return ""
 
@@ -73,27 +53,16 @@ def normalize_month_text(text: str) -> str:
 
 
 def normalize_value(value_text: str) -> dict:
-    """
-    Parse a value cell text like:
-      '7,456,426', '49,602,827', '17,599,801', '0.34%', '—'
-    Return:
-      {"ok": bool, "normalized": str}
-
-    注意：本函式只清洗數字，不進行單位換算。
-    單位由 build_result() 輸出的 source_amount_unit / metric_units 正式紀錄。
-    """
+    """清洗數值文字（去千分位、單位、貨幣符號），不做單位換算；回傳 {"ok", "normalized"}。"""
     if value_text is None:
         return {"ok": False, "normalized": ""}
 
     s = str(value_text).strip()
     if not s:
         return {"ok": False, "normalized": ""}
-
-    # Common "missing" glyphs
     if s in {"—", "-", "－", "–", "N/A", "NA", "n/a"}:
         return {"ok": False, "normalized": ""}
 
-    # Remove common units/words. This is only numeric cleaning, not unit conversion.
     s = s.replace("卡", "")
     s = s.replace("仟元", "")
     s = s.replace("千元", "")
@@ -101,18 +70,13 @@ def normalize_value(value_text: str) -> dict:
     s = s.replace("％", "%")
     s = s.replace("\u00a0", " ")
     s = s.strip()
-
-    # Find first numeric token
     m = re.search(r"-?\d[\d,]*\.?\d*", s)
     if not m:
         return {"ok": False, "normalized": ""}
 
     num = m.group(0).replace(",", "")
-    # Drop trailing dot if any
     if num.endswith("."):
         num = num[:-1]
-
-    # If percent, keep numeric part only
     try:
         if "." in num:
             f = float(num)
@@ -130,19 +94,12 @@ def normalize_value(value_text: str) -> dict:
 
 configure_utf8_stdio()
 
-# -----------------------
-# Bank configuration (inline)
-# -----------------------
-
 BANK_KEY = "esun"
 BANK_NAME = "玉山銀行"
 
 # 玉山這支腳本由官網公告 API + 最新公告 HTML 抽取信用卡財務揭露資訊。
-# 目的：抓取資料並正式紀錄來源單位，不在子腳本階段轉成百萬元。
-# 後續跨銀行比較時，建議由 run_all_banks.py 依 metric_units 統一轉為百萬元。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
-AMOUNT_UNIT_NORMALIZED = False
 
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -388,16 +345,7 @@ def build_result(
         "status": status,
         "data_month": data_month,
         "base_date": base_date,
-
-        # ===== 單位紀錄 =====
-        # source_amount_unit：本銀行來源金額單位。
-        # metric_units：各 metrics 欄位對應來源單位。
-        # amount_unit_normalized：False 表示本子腳本只紀錄來源單位，尚未轉成百萬元。
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": AMOUNT_UNIT_NORMALIZED,
-        "unit_note": "本腳本保留玉山銀行來源公告單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics,
         "source": {
             "source_type": "html",

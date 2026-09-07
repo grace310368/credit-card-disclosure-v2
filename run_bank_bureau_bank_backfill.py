@@ -24,17 +24,12 @@ sys.dont_write_bytecode = True
 
 from bank_aliases import BANK_BUREAU_ALIASES, BANK_ITEM_ALIASES, ITEM_RANKS
 from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
-from workbook_block_helpers import apply_default_font
 from workbook_block_helpers import (
-    append_month_block as shared_append_month_block,
+    apply_default_font,
     canonical_block_item as shared_canonical_block_item,
-    copy_row_style as shared_copy_row_style,
     find_month_block as shared_find_month_block,
     find_or_create_month_block as shared_find_or_create_month_block,
     refresh_block_metadata as shared_refresh_block_metadata,
-    set_block_row_metadata as shared_set_block_row_metadata,
-    set_row_value_if_present as shared_set_row_value_if_present,
-    validate_block_items as shared_validate_block_items,
 )
 
 DEFAULT_WORKBOOK = Path("銀行局信用卡公開資料.xlsx")
@@ -95,8 +90,7 @@ HEADER_ALIASES = {
     "cancelled_cards_this_month": ["當月停卡數"],
     "signed_amount_raw": ["當月簽帳金額"],
     "revolving_balance_raw": ["循環信用餘額"],
-    # 以下 7 欄自 2026-07 起改列為必要欄位：來源檔缺任一欄時，該月整月報錯，
-    # 不再只記警告留空。別名以 115年04月 實際檔案表頭為準（占/佔、有無 (%) 後綴都涵蓋；全形括號由 normalize 處理）。
+    # 別名以實際檔案表頭為準（占/佔、有無 (%) 後綴都涵蓋；全形括號由 normalize 處理）。
     "installment_balance_raw": ["未到期分期付款餘額"],
     "cash_advance_raw": ["當月預借現金金額", "預借現金金額"],
     "overdue_3m_ratio_raw": [
@@ -116,11 +110,6 @@ HEADER_ALIASES = {
     "charge_off_ytd_raw": ["當年度轉銷呆帳金額累計至資料月份", "當年度累計轉銷呆帳金額"],
 }
 
-# 已無選配來源欄位：原 7 個選配欄位已升級為必要欄位（見上方 HEADER_ALIASES）。
-# 保留空字典以維持 ALL_HEADER_ALIASES 與 missing_optional_headers 相關程式碼不需變動。
-OPTIONAL_HEADER_ALIASES: dict[str, list[str]] = {}
-
-ALL_HEADER_ALIASES = {**HEADER_ALIASES, **OPTIONAL_HEADER_ALIASES}
 
 
 @dataclass
@@ -350,7 +339,7 @@ def normalize_header_text(value: Any) -> str:
 
 def match_header_key(header_value: Any) -> str | None:
     normalized = normalize_header_text(header_value)
-    for key, aliases in ALL_HEADER_ALIASES.items():
+    for key, aliases in HEADER_ALIASES.items():
         if any(normalized == normalize_header_text(alias) for alias in aliases):
             return key
     return None
@@ -380,7 +369,6 @@ def parse_bank_rows_from_xlsx_bytes(xlsx_bytes: bytes, source_label: str) -> dic
     missing_headers = [k for k in HEADER_ALIASES if k not in header_map]
     if missing_headers:
         raise ValueError(f"銀行局檔案缺少欄位: {missing_headers}; source={source_label}")
-    missing_optional_headers = [k for k in OPTIONAL_HEADER_ALIASES if k not in header_map]
 
     def cell_thousand_to_million(row: int, key: str) -> float | int | None:
         col = header_map.get(key)
@@ -441,7 +429,6 @@ def parse_bank_rows_from_xlsx_bytes(xlsx_bytes: bytes, source_label: str) -> dic
         "banks": banks,
         "matched_rows": matched_rows,
         "missing_banks": missing_banks,
-        "missing_optional_headers": missing_optional_headers,
     }
 
 
@@ -705,35 +692,9 @@ def require_headers(idx: dict[str, int], required: list[str], sheet_name: str) -
         raise ValueError(f"{sheet_name} 缺少欄位: {missing}")
 
 
-def copy_row_style(ws, src_row: int, dst_row: int) -> None:
-    shared_copy_row_style(ws, src_row, dst_row)
-
-
-def set_row_value_if_present(ws, row_no: int, index_map: dict[str, int], field: str, value: Any) -> None:
-    shared_set_row_value_if_present(ws, row_no, index_map, field, value)
-
-
-def set_block_row_metadata(ws, row_no: int, index_map: dict[str, int], *, yyyymm: int, ad_year: int, month_number: int, rank: int | None, item: str) -> None:
-    shared_set_block_row_metadata(
-        ws, row_no, index_map, yyyymm=yyyymm, ad_year=ad_year, month_number=month_number, rank=rank, item=canonical_block_item(item)
-    )
-
-
-def validate_block_items(ws, index_map: dict[str, int], rows: list[int], yyyymm: int) -> dict[str, int]:
-    return shared_validate_block_items(
-        ws, index_map, rows, yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='月 block '
-    )
-
-
 def find_month_block(ws, index_map: dict[str, int], yyyymm: int) -> dict[str, Any] | None:
     return shared_find_month_block(
         ws, index_map, yyyymm, normalize_yyyymm=normalize_month_yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='月 block '
-    )
-
-
-def append_month_block(ws, index_map: dict[str, int], ad_year: int, month_number: int) -> dict[str, Any]:
-    return shared_append_month_block(
-        ws, index_map, ad_year=ad_year, month_number=month_number, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS
     )
 
 
@@ -907,18 +868,10 @@ def month_candidates_to_process(
     newest_yyyymm: int | None = None,
 ) -> list[int]:
     """
-    決定自動模式要處理哪些月份。共有兩種來源：
-
-    1. 日曆缺口偵測：以「最新資料月」往前，把時間軸上**完全缺漏**（工作簿裡沒有
-       任何列）的年月列入。這些月會交給呼叫端用 find_or_create_month_block 建立
-       後回補；若銀行局來源該月尚無資料，後續會自動 skip_missing_banks，不會
-       建立空 block。
-    2. 既有 block 的空白 / 缺公式：既有月份中若 10 家銀行指標有空白，或銀行局列
-       Top5/Top10 公式缺漏，一併列入。
-
-    最新錨點（newest_yyyymm）優先用呼叫端傳入的「10 家銀行資料月」，未指定時退回
-    工作簿最新月。往前的下界固定為 BACKFILL_START_YYYYMM（202601），並以
-    lookback_months 限制掃描的日曆月數。回傳由新到舊排序。
+    自動模式要處理的月份（由新到舊）：
+    1. 日曆缺口：newest 往前到 BACKFILL_START_YYYYMM 之間工作簿完全沒有的年月。
+    2. 既有 block 中 10 家銀行指標有空白、或銀行局列 Top5/Top10 公式缺漏的年月。
+    newest 優先用呼叫端傳入的資料月，未指定時用工作簿最新月；lookback_months 限制掃描月數。
     """
     existing = existing_months(ws, index_map)
     existing_set = set(existing)
@@ -929,7 +882,6 @@ def month_candidates_to_process(
     newest = max(anchor_candidates)
     if newest < BACKFILL_START_YYYYMM:
         return []
-    # 下界固定為回補起始月（202601），不再往更早的月份掃描
     oldest = BACKFILL_START_YYYYMM
 
     candidates: list[int] = []
@@ -937,11 +889,8 @@ def month_candidates_to_process(
     for yyyymm in iter_months_descending(newest, oldest):
         if checked >= lookback_months:
             break
-        if yyyymm < BACKFILL_START_YYYYMM:  # 保險，理論上不會走到
-            break
         checked += 1
         if yyyymm not in existing_set:
-            # 時間軸上完全缺漏的月份 → 需建立並回補
             candidates.append(yyyymm)
             continue
         block_info = find_month_block(ws, index_map, yyyymm)
@@ -1051,9 +1000,6 @@ def main() -> None:
             payload = fetch_bank_bureau_month(roc_y, roc_m, fetch_options)
             cache[requested_yyyymm] = payload
         summary_warnings.extend(payload.get("warnings", []))
-        missing_optional = payload.get("missing_optional_headers") or []
-        if missing_optional:
-            summary_warnings.append(f"{target_month}: 銀行局檔案缺少選配欄位（該些欄位留空）: {missing_optional}")
 
         if payload.get("missing_banks"):
             results.append({

@@ -32,8 +32,6 @@ BANK_NAME = "第一銀行"
 ENTRY = "https://ccard.firstbank.com.tw/cmsweb/home/creditcardreport"
 
 # 第一銀行信用卡重要業務資訊頁面，金額欄位通常以「仟元」揭露。
-# 本腳本的目標是「紀錄來源單位」，不在子腳本階段轉換為百萬元。
-# 後續如需統一為百萬元，建議由 run_all_banks.py 主控腳本集中轉換。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
 
@@ -73,8 +71,6 @@ LABEL_MAP = {
 }
 REQUIRED = list(LABEL_MAP.values())
 YM6_RE = re.compile(r"\b(\d{6})\b")
-
-# 明確紀錄各欄位來源單位。
 # 同時保留 canonical key 與現行 metrics key，方便主控腳本或下游程式讀取。
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -182,16 +178,7 @@ def build_result(
         "entry": entry_url,
         "report_url": report_url or "",
         "month": month or "",
-
-        # ===== 單位紀錄 =====
-        # source_amount_unit：本銀行來源金額單位。
-        # metric_units：各 metrics 欄位對應來源單位。
-        # amount_unit_normalized：False 表示本子腳本只紀錄來源單位，尚未轉成百萬元。
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": False,
-        "unit_note": "本腳本保留第一銀行來源單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics or {},
         "message": message or "",
         "errors": errors or [],

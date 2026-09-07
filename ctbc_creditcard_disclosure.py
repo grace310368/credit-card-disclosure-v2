@@ -28,12 +28,8 @@ WORKSPACE_DIR = BASE_DIR.parent
 BANK_KEY = "ctbc"
 BANK_NAME = "中國信託商業銀行"
 
-# 中信這支腳本是「由使用者上傳/本機檔案」解析資料。
-# 目的：抓取資料並正式紀錄來源單位，不在子腳本階段轉成百萬元。
-# 後續跨銀行比較時，建議由 run_all_banks.py 依 metric_units 統一轉為百萬元。
 SOURCE_AMOUNT_UNIT = "仟元"
 STANDARD_CARD_UNIT = "張"
-AMOUNT_UNIT_NORMALIZED = False
 
 METRIC_UNITS = {
     "circulating_cards": STANDARD_CARD_UNIT,
@@ -54,8 +50,7 @@ METRIC_UNITS = {
     "charge_off_amount_this_month_thousand": SOURCE_AMOUNT_UNIT,
     "charge_off_amount_ytd_thousand": SOURCE_AMOUNT_UNIT,
     "debit_card_signed_amount_thousand": SOURCE_AMOUNT_UNIT,
-    # 逾期比率在解析階段就統一轉成小數比率（normalize_metric_value），
-    # 這裡宣告 decimal_ratio 讓 run_all_banks 知道不可再除以 100。
+    # 逾期比率在解析階段已轉成小數比率，宣告 decimal_ratio 讓 run_all_banks 不再 /100。
     "overdue_3m_ratio_percent": "decimal_ratio",
     "overdue_6m_ratio_percent": "decimal_ratio",
     "allowance_coverage_ratio_percent": "%",
@@ -190,7 +185,7 @@ def normalize_month_text(text: str) -> str:
 
 
 def normalize_value(value_text: Any) -> dict[str, Any]:
-    """只清洗數字，不進行單位換算；單位由 metric_units 正式紀錄。"""
+    """清洗數值文字（去千分位、單位、貨幣符號），不做單位換算；回傳 {"ok", "normalized"}。"""
     if value_text is None:
         return {"ok": False, "normalized": ""}
     s = str(value_text).strip()
@@ -249,18 +244,6 @@ def extract_text_from_xlsx(path: Path) -> str:
             if values:
                 chunks.append("\t".join(values))
     return "\n".join(chunks)
-
-
-def extract_xlsx_rows(path: Path) -> list[list[Any]]:
-    wb = load_workbook(path, data_only=True, read_only=True)
-    rows: list[list[Any]] = []
-    for ws in wb.worksheets:
-        rows.append([f"[sheet]{ws.title}"])
-        for row in ws.iter_rows(values_only=True):
-            values = list(row)
-            if any(cell not in (None, "") for cell in values):
-                rows.append(values)
-    return rows
 
 
 def normalize_label_text(text: Any) -> str:
@@ -436,8 +419,6 @@ def parse_ctbc_fixed_layout_rows(first_sheet_rows: list[list[Any]]) -> dict[str,
         if row_index >= len(first_sheet_rows):
             return {}
         row = first_sheet_rows[row_index]
-        label = normalize_label_text(cell_raw_value(row[1]) if len(row) > 1 else "")
-        # 來源表順序穩定，優先按列序抓；若標籤偏移就記錄 hint，仍繼續以固定順序取值。
         value = row[3] if len(row) > 3 else None
         if metric_key in PERCENT_METRIC_KEYS:
             normalized = normalize_metric_value(metric_key, cell_raw_value(value), getattr(value, 'number_format', ''))
@@ -815,13 +796,7 @@ def build_result(status: str, source_path: Path | None, data_month: str, base_da
         "status": status,
         "data_month": data_month,
         "base_date": base_date,
-
-        # ===== 單位紀錄 =====
-        "source_amount_unit": SOURCE_AMOUNT_UNIT,
         "metric_units": dict(METRIC_UNITS),
-        "amount_unit_normalized": AMOUNT_UNIT_NORMALIZED,
-        "unit_note": "本腳本保留中國信託來源/上傳檔案單位；金額欄位為仟元，卡數欄位為張。若需統一為百萬元，請由主控腳本集中轉換。",
-
         "metrics": metrics,
         "source": {
             "source_type": SOURCE_TYPE_BY_EXT.get(suffix, "manual_upload_local_file"),

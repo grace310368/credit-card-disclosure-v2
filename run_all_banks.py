@@ -152,21 +152,6 @@ def parse_args() -> argparse.Namespace:
         help="轉傳 --allow-insecure 給 firstbank 子腳本（啟用其第三段 CERT_NONE fallback；其他銀行腳本會自動 fallback，不需此參數）",
     )
     parser.add_argument(
-        "--retry-failed-from",
-        default="",
-        help="指定前次彙整 JSON 路徑，只重跑其中 failed / partial_success 的銀行",
-    )
-    parser.add_argument(
-        "--retry-status",
-        default="failed,partial_success",
-        help="搭配 --retry-failed-from 使用，預設重跑 failed,partial_success",
-    )
-    parser.add_argument(
-        "--merge-with-previous",
-        action="store_true",
-        help="搭配 --retry-failed-from 使用，將本次重跑結果與前次 JSON 其餘銀行合併後再回傳",
-    )
-    parser.add_argument(
         "--collect-only",
         nargs="+",
         default=[],
@@ -221,45 +206,14 @@ def resolve_existing_path(path_text: str) -> Path:
     raise SystemExit(f"找不到檔案：{path_text}")
 
 
-def load_results_json(path_text: str) -> list[dict[str, Any]]:
-    """
-    讀取前次結果。
-    支援兩種格式：
-    1. list[dict]：舊版直接存 results list
-    2. dict 且含 results：本版 stdout / --json-output 的完整 payload
-    """
-    path = resolve_existing_path(path_text)
-    data = json.loads(path.read_text(encoding="utf-8"))
-
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict) and isinstance(data.get("results"), list):
-        return data["results"]
-
-    raise SystemExit("前次 JSON 格式錯誤，預期為 list 或含 results 的 dict")
-
-
 def is_normalized_result(result: dict[str, Any]) -> bool:
-    """
-    判斷紀錄是否已被 flatten_result_fields 標準化。
-    normalize_metrics 會在標準化後把 metrics_units 蓋成 METRIC_UNITS
-    （百分比欄位為 decimal_ratio）；已標準化的紀錄不可再跑一次
-    flatten_result_fields，否則比率 > 1 的值會被重複除以 100（例如 3.6 -> 0.036）。
-    """
+    """已標準化的紀錄 metrics_units 為 decimal_ratio；不可再跑 flatten_result_fields，否則比率會重複 /100。"""
     metrics_units = result.get("metrics_units")
     return isinstance(metrics_units, dict) and metrics_units.get("overdue_3m_ratio_percent") == "decimal_ratio"
 
 
 def load_collect_results(path_text: str) -> list[dict[str, Any]]:
-    """
-    讀取 --collect-only 指定的既有結果檔。
-    支援三種格式：
-    1. list[dict]：直接存 results list
-    2. dict 且含 results：run_all_banks 彙整 payload
-    3. 其他 dict：單一銀行腳本 stdout JSON
-    未標準化的紀錄會套用與現跑相同的 flatten_result_fields。
-    """
+    """讀取 --collect-only 檔案：results list、run_all_banks 彙整 payload 或單一銀行 stdout JSON 皆可。"""
     path = resolve_existing_path(path_text)
     data = json.loads(path.read_text(encoding="utf-8-sig"))
 
@@ -290,21 +244,6 @@ def result_bank_key(result: dict[str, Any]) -> str:
     bank_name = str(result.get("bank") or "").strip()
     key = BANK_NAME_TO_KEY.get(bank_name, "")
     return key
-
-
-def resolve_retry_statuses(text: str) -> set[str]:
-    items = {item.strip() for item in str(text or "").split(",") if item.strip()}
-    return items or {"failed", "partial_success"}
-
-
-def determine_retry_banks(previous_results: list[dict[str, Any]], statuses: set[str]) -> list[str]:
-    banks: list[str] = []
-    for result in previous_results:
-        status = str(result.get("status") or "")
-        key = result_bank_key(result)
-        if status in statuses and key in BANK_SCRIPTS and key not in banks:
-            banks.append(key)
-    return banks
 
 
 def sort_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -458,19 +397,9 @@ def thousand_to_million(value: Any) -> int | float | None:
 
 def normalize_metrics(result: dict[str, Any]) -> dict[str, Any]:
     """
-    將 metrics 裡六大指標標準化：
-    1. 卡數類欄位轉成數字，單位為「張」
-    2. 金額類欄位統一轉成「百萬元」
-       - signed_amount_thousand -> signed_amount_million
-       - revolving_balance_thousand -> revolving_balance_million
-    3. 新增 metrics_units 紀錄標準化後欄位單位（百分比欄位為 decimal_ratio）
-    4. 新增 metrics_source_units 紀錄原始金額欄位單位
-    5. 保留原始仟元欄位，避免影響除錯或追溯來源
-
-    注意：
-    - 後續彙整 Excel 或資料庫時，金額請優先取：
-      signed_amount_million、revolving_balance_million。
-    - 若某些子腳本已直接回傳 *_million，這裡會直接轉成數字，不會再除以 1000。
+    標準化 metrics：卡數轉數字（張）、仟元金額轉百萬元（保留原始 *_thousand）、
+    百分比轉小數比率，並寫入 metrics_units / metrics_source_units。
+    子腳本已回傳 *_million 時直接採用，不再除以 1000。
     """
     metrics = result.get("metrics")
     if not isinstance(metrics, dict):
@@ -534,10 +463,7 @@ def normalize_metrics(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def flatten_result_fields(result: dict[str, Any]) -> dict[str, Any]:
-    """
-    將子腳本結果補成 update_credit_card_workbook.py 可直接讀的扁平欄位，
-    同時保留原本 metrics/source/errors/_runner 結構供除錯與追溯。
-    """
+    """補出 update_credit_card_workbook.py 直接讀取的扁平欄位；metrics/source/errors/_runner 原樣保留。"""
     result = normalize_metrics(result)
 
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
@@ -762,14 +688,9 @@ def main() -> int:
     configure_utf8_stdio()
     args = parse_args()
 
-    if args.collect_only and args.retry_failed_from:
-        raise SystemExit("--collect-only 不能與 --retry-failed-from 併用")
-
     if args.preflight:
         return run_preflight(args.month)
 
-    previous_results: list[dict[str, Any]] = []
-    retry_mode = bool(args.retry_failed_from)
     collect_only_mode = bool(args.collect_only)
     missing_banks: list[str] = []
 
@@ -782,23 +703,9 @@ def main() -> int:
         banks = [key for key in (result_bank_key(item) for item in results) if key]
         missing_banks = [key for key in BANK_ORDER if key not in banks]
     else:
-        if retry_mode:
-            previous_results = load_results_json(args.retry_failed_from)
-            retry_statuses = resolve_retry_statuses(args.retry_status)
-            banks = determine_retry_banks(previous_results, retry_statuses)
-            if not banks:
-                raise SystemExit(f"前次結果中沒有狀態屬於 {sorted(retry_statuses)} 的銀行可重跑")
-        else:
-            banks = resolve_banks(args.banks)
-
+        banks = resolve_banks(args.banks)
         rerun_results = [run_bank(bank, args.month, args.timeout, args.allow_insecure) for bank in banks]
-
-        results = (
-            merge_results(previous_results, rerun_results)
-            if retry_mode and args.merge_with_previous
-            else rerun_results
-        )
-        results = sort_results(results)
+        results = sort_results(rerun_results)
 
     success_count = sum(1 for item in results if item.get("status") == "success")
     partial_count = sum(1 for item in results if item.get("status") == "partial_success")
@@ -807,11 +714,9 @@ def main() -> int:
     output_payload: dict[str, Any] = {
         "status": "success",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "retry_mode": retry_mode,
         "banks": banks,
         "rerun_count": len(rerun_results),
         "output_result_count": len(results),
-        "merge_with_previous": bool(retry_mode and args.merge_with_previous),
         "success_count": success_count,
         "partial_success_count": partial_count,
         "failed_count": failed_count,
