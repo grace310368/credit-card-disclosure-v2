@@ -10,25 +10,25 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.formula.translate import Translator
 
 # 避免在唯讀執行沙箱中產生 __pycache__/*.pyc（會觸發 Refusing to overwrite）
 sys.dont_write_bytecode = True
 
-from bank_aliases import BANK_BUREAU_ALIASES, BANK_ITEM_ALIASES, ITEM_RANKS
+from bank_aliases import BANK_BUREAU_ALIASES, BANK_NAMES, BANK_ORDER, MARKET_TOTAL_ITEM
 from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
 from workbook_block_helpers import (
     apply_default_font,
-    canonical_block_item as shared_canonical_block_item,
+    canonical_block_item,
+    copy_formula_cells,
     find_month_block as shared_find_month_block,
     find_or_create_month_block as shared_find_or_create_month_block,
+    normalize_item_labels,
     refresh_block_metadata as shared_refresh_block_metadata,
 )
 
@@ -38,19 +38,6 @@ BACKFILL_START_YYYYMM = 202601
 DEFAULT_ZIP_SEARCH_DIRS = [Path("."), Path("input")]
 ZIP_SUFFIX = "信用卡重要資訊揭露.zip"
 
-BANK_ORDER = ["ctbc", "fubon", "cathay", "esun", "taishin", "dbs", "ubot", "sinopac", "firstbank", "feib"]
-BANK_NAMES = {
-    "ctbc": "中信",
-    "fubon": "富邦",
-    "cathay": "國泰",
-    "esun": "玉山",
-    "taishin": "台新",
-    "dbs": "星展",
-    "ubot": "聯邦",
-    "sinopac": "永豐",
-    "firstbank": "第一",
-    "feib": "遠東",
-}
 CARD_ROW_STARTS = {
     "circulating_cards": 5,
     "valid_cards": 22,
@@ -524,8 +511,26 @@ def fetch_bank_bureau_month(y: int, m: int, options: FetchOptions) -> dict[str, 
             return payload
 
     url = build_zip_url(y, m)
-    zip_bytes, meta = download_bytes(url, insecure=options.insecure)
-    payload = parse_bank_rows_from_zip_bytes(zip_bytes, url)
+    try:
+        zip_bytes, meta = download_bytes(url, insecure=options.insecure)
+        payload = parse_bank_rows_from_zip_bytes(zip_bytes, url)
+    except (urllib.error.HTTPError, zipfile.BadZipFile) as exc:
+        # 未發布的月份：金管會回 404 或導回首頁 HTML。回報 missing_banks 讓呼叫端 skip，不建空 block。
+        if isinstance(exc, urllib.error.HTTPError) and exc.code != 404:
+            raise
+        return {
+            "month": roc_month_text(y, m),
+            "ad_yyyymm": expected_yyyymm,
+            "banks": {},
+            "missing_banks": list(BANK_ORDER),
+            "matched_rows": [],
+            "source_kind": "not_published",
+            "source_url": url,
+            "local_zip_path": None,
+            "download_mode": None,
+            "ssl_fallback_used": False,
+            "warnings": warnings + [f"{roc_month_text(y, m)} 銀行局 ZIP 尚未發布或無法取得，略過：{type(exc).__name__}: {exc}"],
+        }
     if payload["ad_yyyymm"] != expected_yyyymm:
         raise ValueError(f"銀行局月份不一致: 預期 {roc_month_text(y, m)}，實際 {payload['month']}，url={url}")
     if meta.warning:
@@ -542,17 +547,13 @@ def fetch_bank_bureau_month(y: int, m: int, options: FetchOptions) -> dict[str, 
 
 
 MAIN_SHEET = "歷史資料(年+月)"
-MARKET_TOTAL_ITEM = "市場總計(銀行局)"
-BANK_BUREAU_ITEM = "銀行局"
-JCIC_ITEM = "財團法人金融聯合徵信中心"
-BLOCK_ITEMS = [BANK_NAMES[key] for key in BANK_ORDER] + [MARKET_TOTAL_ITEM, BANK_BUREAU_ITEM, JCIC_ITEM]
-BLOCK_SIZE = len(BLOCK_ITEMS)
 
 FIELD_ALIASES = {
     "yyyymm": ["YYYYMM"],
     "ad_year": ["年度"],
     "month_number": ["月份"],
-    "rank": ["Rank"],
+    "rank": ["Rank", "排序編號"],
+    "bank": ["Bank"],
     "item": ["Item"],
     "circulating_cards": ["流通卡數"],
     "valid_cards": ["有效卡數"],
@@ -612,7 +613,9 @@ BANK_WRITABLE_FIELDS = [
     "charge_off_amount_ytd_million",
 ]
 
-BANK_BUREAU_FORMULA_FIELDS = [
+# 市場總計列上的公式欄：市場總計（SUMIFS）與 TOP5/TOP10 占比，新月份由鄰近月份原樣複製。
+MARKET_ROW_FORMULA_FIELDS = [
+    "market_total",
     "top5_circulating_cards",
     "top10_circulating_cards",
     "top5_valid_cards",
@@ -652,28 +655,6 @@ def get_main_sheet(wb):
     return wb[wb.sheetnames[0]]
 
 
-def canonical_block_item(value: Any) -> str:
-    return shared_canonical_block_item(
-        value, special_items=[MARKET_TOTAL_ITEM, BANK_BUREAU_ITEM, JCIC_ITEM], bank_names=BANK_NAMES, bank_item_aliases=BANK_ITEM_ALIASES
-    )
-
-
-def normalize_item_labels(ws, index_map: dict[str, int]) -> dict[str, Any]:
-    """把歷史資料與新寫入的 Item 全部統一成簡稱。"""
-    item_col = index_map.get("item")
-    if item_col is None:
-        return {"changed_count": 0, "changed_rows": []}
-    changed_rows: list[dict[str, Any]] = []
-    for row_no in range(2, ws.max_row + 1):
-        raw_value = ws.cell(row_no, item_col).value
-        normalized = canonical_block_item(raw_value)
-        raw_text = str(raw_value or "").strip()
-        if normalized != raw_text:
-            ws.cell(row_no, item_col).value = normalized
-            changed_rows.append({"row": row_no, "from": raw_text, "to": normalized})
-    return {"changed_count": len(changed_rows), "changed_rows": changed_rows}
-
-
 def header_index_map(ws, field_aliases: dict[str, list[str]]) -> dict[str, int]:
     normalized_headers = {normalize_text(ws.cell(1, col).value): col for col in range(1, ws.max_column + 1)}
     out: dict[str, int] = {}
@@ -693,21 +674,15 @@ def require_headers(idx: dict[str, int], required: list[str], sheet_name: str) -
 
 
 def find_month_block(ws, index_map: dict[str, int], yyyymm: int) -> dict[str, Any] | None:
-    return shared_find_month_block(
-        ws, index_map, yyyymm, normalize_yyyymm=normalize_month_yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='月 block '
-    )
+    return shared_find_month_block(ws, index_map, yyyymm, normalize_yyyymm=normalize_month_yyyymm, block_label="月 block ")
 
 
 def find_or_create_month_block(ws, index_map: dict[str, int], ad_year: int, month_number: int) -> dict[str, Any]:
-    return shared_find_or_create_month_block(
-        ws, index_map, ad_year=ad_year, month_number=month_number, normalize_yyyymm=normalize_month_yyyymm, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS, canonicalize_item=canonical_block_item, block_label='月 block '
-    )
+    return shared_find_or_create_month_block(ws, index_map, ad_year=ad_year, month_number=month_number, normalize_yyyymm=normalize_month_yyyymm, block_label="月 block ")
 
 
 def refresh_block_metadata(ws, index_map: dict[str, int], block_info: dict[str, Any], ad_year: int, month_number: int) -> None:
-    shared_refresh_block_metadata(
-        ws, index_map, block_info, ad_year=ad_year, month_number=month_number, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS
-    )
+    shared_refresh_block_metadata(ws, index_map, block_info, ad_year=ad_year, month_number=month_number)
 
 
 def write_bank_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str, Any], bank_payload: dict[str, dict[str, Any]], overwrite: bool) -> dict[str, Any]:
@@ -763,16 +738,17 @@ def has_any_blank_bank_metric(ws, index_map: dict[str, int], block_info: dict[st
 
 
 def find_formula_source_row(ws, index_map: dict[str, int], target_yyyymm: int) -> int | None:
+    """找最接近月份的其他月 block 市場總計列（帶公式）當公式樣板。"""
     candidates: list[tuple[int, int]] = []
     for row_no in range(2, ws.max_row + 1):
-        if str(ws.cell(row_no, index_map["item"]).value or "").strip() != BANK_BUREAU_ITEM:
+        if canonical_block_item(ws.cell(row_no, index_map["item"]).value) != MARKET_TOTAL_ITEM:
             continue
         yyyymm = normalize_month_yyyymm(ws.cell(row_no, index_map["yyyymm"]).value)
         if yyyymm is None or yyyymm == target_yyyymm:
             continue
         if any(
             ws.cell(row_no, index_map[field]).data_type == "f" and isinstance(ws.cell(row_no, index_map[field]).value, str)
-            for field in BANK_BUREAU_FORMULA_FIELDS
+            for field in MARKET_ROW_FORMULA_FIELDS
             if field in index_map
         ):
             candidates.append((abs(yyyymm - target_yyyymm), row_no))
@@ -782,59 +758,32 @@ def find_formula_source_row(ws, index_map: dict[str, int], target_yyyymm: int) -
     return candidates[0][1]
 
 
-def repair_bank_bureau_formulas(ws, index_map: dict[str, int], block_info: dict[str, Any], overwrite: bool) -> dict[str, Any]:
-    target_row = block_info["item_to_row"][BANK_BUREAU_ITEM]
+def repair_market_row_formulas(ws, index_map: dict[str, int], block_info: dict[str, Any], overwrite: bool) -> dict[str, Any]:
+    target_row = block_info["item_to_row"][MARKET_TOTAL_ITEM]
     source_row = find_formula_source_row(ws, index_map, block_info["yyyymm"])
     if source_row is None:
         return {
             "formula_source_row": None,
             "formulas_written": [],
             "formula_skipped_existing": [],
-            "warning": "找不到可用的銀行局公式樣板列",
+            "warning": "找不到可用的市場總計公式樣板列",
         }
-
-    formulas_written: list[str] = []
-    formula_skipped_existing: list[str] = []
-    for field in BANK_BUREAU_FORMULA_FIELDS:
-        column = index_map.get(field)
-        if column is None:
-            continue
-        source = ws.cell(source_row, column)
-        target = ws.cell(target_row, column)
-        if not (source.data_type == "f" and isinstance(source.value, str) and source.value.strip()):
-            continue
-        if overwrite or is_blank(target.value):
-            try:
-                target.value = Translator(source.value, origin=source.coordinate).translate_formula(target.coordinate)
-            except Exception:
-                target.value = source.value
-            if source.has_style:
-                target._style = copy(source._style)
-            target.font = copy(source.font)
-            target.fill = copy(source.fill)
-            target.border = copy(source.border)
-            target.alignment = copy(source.alignment)
-            target.protection = copy(source.protection)
-            target.number_format = source.number_format
-            formulas_written.append(field)
-        else:
-            formula_skipped_existing.append(field)
-
+    columns = {index_map[field]: field for field in MARKET_ROW_FORMULA_FIELDS if field in index_map}
+    written, skipped = copy_formula_cells(ws, source_row, target_row, list(columns), overwrite=overwrite)
     return {
         "formula_source_row": source_row,
-        "formulas_written": formulas_written,
-        "formula_skipped_existing": formula_skipped_existing,
+        "formulas_written": [columns[c] for c in written],
+        "formula_skipped_existing": [columns[c] for c in skipped],
     }
 
 
-def has_missing_bank_bureau_formula(ws, index_map: dict[str, int], block_info: dict[str, Any]) -> bool:
-    row_no = block_info["item_to_row"][BANK_BUREAU_ITEM]
-    for field in BANK_BUREAU_FORMULA_FIELDS:
+def has_missing_market_row_formula(ws, index_map: dict[str, int], block_info: dict[str, Any]) -> bool:
+    row_no = block_info["item_to_row"][MARKET_TOTAL_ITEM]
+    for field in MARKET_ROW_FORMULA_FIELDS:
         column = index_map.get(field)
         if column is None:
             continue
-        value = ws.cell(row_no, column).value
-        if is_blank(value):
+        if is_blank(ws.cell(row_no, column).value):
             return True
     return False
 
@@ -896,7 +845,7 @@ def month_candidates_to_process(
         block_info = find_month_block(ws, index_map, yyyymm)
         if block_info is None:
             continue
-        if has_any_blank_bank_metric(ws, index_map, block_info) or has_missing_bank_bureau_formula(ws, index_map, block_info):
+        if has_any_blank_bank_metric(ws, index_map, block_info) or has_missing_market_row_formula(ws, index_map, block_info):
             candidates.append(yyyymm)
     return candidates
 
@@ -1015,7 +964,7 @@ def main() -> None:
         block_info = find_or_create_month_block(ws, index_map, ad_year, month_number)
         refresh_block_metadata(ws, index_map, block_info, ad_year, month_number)
         bank_result = write_bank_rows_to_block(ws, index_map, block_info, payload["banks"], overwrite=args.overwrite)
-        formula_result = repair_bank_bureau_formulas(ws, index_map, block_info, overwrite=args.overwrite)
+        formula_result = repair_market_row_formulas(ws, index_map, block_info, overwrite=args.overwrite)
 
         results.append({
             "month": target_month,
@@ -1033,7 +982,7 @@ def main() -> None:
             "ssl_fallback_used": payload.get("ssl_fallback_used", False),
             "matched_rows": payload.get("matched_rows", []),
             "bank_result": bank_result,
-            "bank_bureau_formula_result": formula_result,
+            "market_row_formula_result": formula_result,
         })
 
     item_label_fix_summary = normalize_item_labels(ws, index_map)

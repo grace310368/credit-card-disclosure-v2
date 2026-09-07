@@ -21,23 +21,19 @@ from openpyxl import load_workbook
 sys.dont_write_bytecode = True
 
 from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
-from bank_aliases import ITEM_RANKS
-from workbook_block_helpers import apply_default_font
+from bank_aliases import MARKET_TOTAL_ITEM
+from workbook_block_helpers import apply_default_font, canonical_block_item
 
 DEFAULT_WORKBOOK = Path('銀行局信用卡公開資料.xlsx')
 ZIP_SUFFIX = '信用卡重要資訊揭露.zip'
 DEFAULT_ZIP_SEARCH_DIRS = [Path('.'), Path('input')]
 MAIN_SHEET = '歷史資料(年+月)'
-MARKET_TOTAL_ITEM = '市場總計(銀行局)'
-BANK_BUREAU_ITEM = '銀行局'
-JCIC_ITEM = '財團法人金融聯合徵信中心'
-SPECIAL_ITEMS = [MARKET_TOTAL_ITEM, BANK_BUREAU_ITEM, JCIC_ITEM]
 
 LONGFORM_FIELD_ALIASES = {
     'yyyymm': ['YYYYMM'],
     'ad_year': ['年度'],
     'month_number': ['月份'],
-    'rank': ['Rank'],
+    'rank': ['Rank', '排序編號'],
     'item': ['Item'],
     'circulating_cards': ['流通卡數'],
     'valid_cards': ['有效卡數'],
@@ -597,33 +593,16 @@ def build_month_item_rows(ws, index_map: dict[str, int]) -> dict[tuple[int, str]
     item_col = index_map['item']
     for row_no in range(2, ws.max_row + 1):
         yyyymm = to_number(ws.cell(row_no, yyyymm_col).value)
-        item = str(ws.cell(row_no, item_col).value or '').strip()
+        item = canonical_block_item(ws.cell(row_no, item_col).value)
         if yyyymm is None or not item:
             continue
         mapping[(int(yyyymm), item)] = row_no
     return mapping
 
 
-def set_row_value_if_present(ws, row_no: int, index_map: dict[str, int], field: str, value: Any) -> None:
-    column = index_map.get(field)
-    if column is not None:
-        ws.cell(row_no, column).value = value
-
-
-def set_month_item_metadata(ws, row_no: int, index_map: dict[str, int], *, ad_yyyymm: int, ad_year: int, month_number: int, rank: int | None, item: str) -> None:
-    set_row_value_if_present(ws, row_no, index_map, 'yyyymm', ad_yyyymm)
-    set_row_value_if_present(ws, row_no, index_map, 'ad_year', ad_year)
-    set_row_value_if_present(ws, row_no, index_map, 'month_number', month_number)
-    set_row_value_if_present(ws, row_no, index_map, 'rank', rank)
-    set_row_value_if_present(ws, row_no, index_map, 'item', item)
-
-
-def find_special_item_row(ws, index_map: dict[str, int], row_map: dict[tuple[int, str], int], ad_yyyymm: int, ad_year: int, month_number: int, item: str) -> int | None:
-    """回傳既有月 block 中該 Item 的列號；月 block 不存在時回傳 None（不自建列）。"""
-    row_no = row_map.get((ad_yyyymm, item))
-    if row_no is not None:
-        set_month_item_metadata(ws, row_no, index_map, ad_yyyymm=ad_yyyymm, ad_year=ad_year, month_number=month_number, rank=ITEM_RANKS.get(item), item=item)
-    return row_no
+def find_market_row(row_map: dict[tuple[int, str], int], ad_yyyymm: int) -> int | None:
+    """回傳既有月 block 的市場總計列；月 block 不存在時回傳 None（不自建列）。"""
+    return row_map.get((ad_yyyymm, MARKET_TOTAL_ITEM))
 
 
 def row_has_any_blank_metric(ws, row_no: int, index_map: dict[str, int], fields: list[str]) -> bool:
@@ -654,24 +633,6 @@ def write_market_total_row(ws, row_no: int, index_map: dict[str, int], market: d
             written[field] = value
         else:
             skipped_existing[field] = cell.value
-    return {'written': written, 'skipped_existing': skipped_existing}
-
-
-def write_bank_bureau_row(ws, row_no: int, index_map: dict[str, int], market: dict[str, Any], overwrite: bool) -> dict[str, Any]:
-    written: dict[str, Any] = {}
-    skipped_existing: dict[str, Any] = {}
-    column = index_map.get('market_total')
-    if column is None:
-        return {'written': written, 'skipped_existing': skipped_existing}
-    cell = ws.cell(row_no, column)
-    value = market.get('circulating_cards')
-    if overwrite or is_blank(cell.value):
-        cell.value = value
-        if value is not None:
-            apply_default_font(cell)
-        written['market_total'] = value
-    else:
-        skipped_existing['market_total'] = cell.value
     return {'written': written, 'skipped_existing': skipped_existing}
 
 
@@ -805,38 +766,18 @@ def main() -> None:
             continue
         processed_actual_months.add(actual_yyyymm)
 
-        market_row_no = find_special_item_row(
-            ws,
-            index_map,
-            row_map,
-            market['ad_yyyymm'],
-            market['ad_year'],
-            market['month_number'],
-            MARKET_TOTAL_ITEM,
-        )
-        bank_bureau_row_no = find_special_item_row(
-            ws,
-            index_map,
-            row_map,
-            market['ad_yyyymm'],
-            market['ad_year'],
-            market['month_number'],
-            BANK_BUREAU_ITEM,
-        )
-
-        if market_row_no is None or bank_bureau_row_no is None:
+        market_row_no = find_market_row(row_map, market['ad_yyyymm'])
+        if market_row_no is None:
             results.append({
                 'month': market['month'],
                 'ad_yyyymm': market['ad_yyyymm'],
                 'action': 'skip_missing_month_block',
-                'warning': f'YYYYMM={market["ad_yyyymm"]} 在工作簿中沒有月 block，略過；請先由 update_credit_card_workbook.py 或 run_bank_bureau_bank_backfill.py 建立該月 13 列 block',
+                'warning': f'YYYYMM={market["ad_yyyymm"]} 在工作簿中沒有月 block，略過；請先由 update_credit_card_workbook.py 或 run_bank_bureau_bank_backfill.py 建立該月 11 列 block',
             })
             continue
 
         if idx > 0 and not args.overwrite and not row_has_any_blank_metric(ws, market_row_no, index_map, LONGFORM_MARKET_FIELDS):
-            bank_bureau_column = index_map.get('market_total')
-            if bank_bureau_column is not None and not is_blank(ws.cell(bank_bureau_row_no, bank_bureau_column).value):
-                continue
+            continue
 
         action = 'latest_month_update' if idx == 0 else 'backfill_blank_metrics'
         results.append(
@@ -846,15 +787,6 @@ def main() -> None:
                 write_market_total_row(ws, market_row_no, index_map, market, overwrite=args.overwrite),
                 row_no=market_row_no,
                 item=MARKET_TOTAL_ITEM,
-            )
-        )
-        results.append(
-            build_result(
-                action + '_bank_bureau',
-                market,
-                write_bank_bureau_row(ws, bank_bureau_row_no, index_map, market, overwrite=args.overwrite),
-                row_no=bank_bureau_row_no,
-                item=BANK_BUREAU_ITEM,
             )
         )
 
