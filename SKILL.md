@@ -195,9 +195,11 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 ## 自動排程（Claude Routine）
 
 - 每月 15 日 11:00（台灣時間）：提醒排程檢查 main 根目錄是否已有目標月的 `中信信用卡<yyyymm>.xlsx`，沒有就推播提醒上傳。
-- 每月 15 日 17:30（台灣時間）：更新排程在新 session 照情境 A 跑完整流程，把 `銀行局信用卡公開資料.xlsx`
-  commit 到分支 `auto/monthly-update-<yyyymm>` 並開 PR 到 main，PR 內附 `verification`、`percent_audit`、失敗銀行與警告；
-  **不直接推 main**。中信檔缺少時以 `--allow-partial-summary` 先寫其餘 9 家並在 PR 註明。
+- 每月 15 日 17:30（台灣時間）：更新排程在原本的維護 session 內照情境 A 跑完整流程（該 session 有 repo 推送權與 GitHub 工具），
+  把 `銀行局信用卡公開資料.xlsx` commit 到分支 `auto/monthly-update-<yyyymm>` 並開 PR 到 main（標題「信用卡揭露月更新：<月>」），
+  PR 內附 `verification`、`percent_audit`、失敗銀行與警告；**不直接推 main**。中信檔缺少時以 `--allow-partial-summary` 先寫其餘 9 家並在 PR 註明。
+- 每月 15 日 18:30（台灣時間）：結果通知排程讀 GitHub PR 清單，推播當月 PR 連結；沒有 PR 就提醒到維護 session 查看原因。
+- 排程開出的新 session 沒有 repo 憑證與 GitHub 工具，只能做唯讀查詢（提醒、通知）；會寫入 repo 的工作必須綁在有權限的 session。
 - 相依套件由 `.claude/hooks/session-start.sh`（`requirements.txt`：openpyxl、pypdf）在 session 啟動時安裝。
 
 ## 維護提醒

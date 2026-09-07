@@ -160,8 +160,9 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 
 ## 自動排程與環境
 
-- Claude Routine 兩支（台灣時間）：每月 15 日 11:00 提醒上傳中信檔；每月 15 日 17:30 執行月更新，
-  結果 commit 到 `auto/monthly-update-<yyyymm>` 分支並開 PR 到 main，由人工檢查後合併。
+- Claude Routine 三支（台灣時間）：每月 15 日 11:00 提醒上傳中信檔（新 session，推播）；15 日 17:30 在維護 session 執行月更新，
+  結果 commit 到 `auto/monthly-update-<yyyymm>` 分支並開 PR 到 main，由人工檢查後合併；15 日 18:30 結果通知（新 session，讀 GitHub PR 清單推播）。
+  排程開出的新 session 沒有 repo 憑證與 GitHub 工具，只能唯讀查詢，因此寫入 repo 的工作綁在維護 session。
 - `.claude/hooks/session-start.sh` 在 Claude Code on the web 的 session 啟動時安裝 `requirements.txt`
   （openpyxl、pypdf）；本機環境自行 `pip install -r requirements.txt`。
 
