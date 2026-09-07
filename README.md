@@ -24,7 +24,7 @@
 
 ## 工作簿結構
 
-- 預設工作簿：`銀行局信用卡公開資料*.xlsx`（檔名帶資料區間與日期）；主要工作表：`歷史資料(年+月)`，整張表是 Excel Table `creditcard`
+- 預設工作簿：`銀行局信用卡公開資料.xlsx`（repo 根目錄、固定檔名，歷史版本靠 git 保留）；主要工作表：`歷史資料(年+月)`，整張表是 Excel Table `creditcard`
 - 前 7 欄：`YYYYMM`、`年度`、`月份`、`季度`、`排序編號`、`Bank`、`Item`；其中年度/月份/季度是結構化公式（由 `YYYYMM` 推得）
 - 14 個指標欄：流通卡數、有效卡數、當月發卡數、當月停卡數、循環信用餘額、未到期分期付款餘額、當月簽帳金額、
   當月預借現金金額、逾期三個月以上比率、逾期六個月以上比率、備抵呆帳提足率、當月轉銷呆帳金額、
@@ -157,6 +157,13 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 14. 當月轉帳卡簽帳金額
 
 ---
+
+## 自動排程與環境
+
+- Claude Routine 兩支（台灣時間）：每月 15 日 11:00 提醒上傳中信檔；每月 15 日 17:30 執行月更新，
+  結果 commit 到 `auto/monthly-update-<yyyymm>` 分支並開 PR 到 main，由人工檢查後合併。
+- `.claude/hooks/session-start.sh` 在 Claude Code on the web 的 session 啟動時安裝 `requirements.txt`
+  （openpyxl、pypdf）；本機環境自行 `pip install -r requirements.txt`。
 
 ## 改文件或程式時要避免的說法
 

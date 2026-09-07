@@ -10,7 +10,7 @@ description: 當使用者要抓取、整理、回補、同步或維護台灣銀�
 
 處理 **台灣銀行信用卡官方揭露資料** 的抓取、彙整、回寫 Excel、舊月份回補與腳本維護。
 
-- 預設工作簿：`銀行局信用卡公開資料*.xlsx`（工作區根目錄，檔名帶資料區間如 `_2015-202606_20260907`）；主要工作表：`歷史資料(年+月)`（35 欄的 Excel Table `creditcard`）
+- 預設工作簿：`銀行局信用卡公開資料.xlsx`（repo 根目錄，固定檔名，歷史版本靠 git）；主要工作表：`歷史資料(年+月)`（35 欄的 Excel Table `creditcard`）
 - 每個年月（或年度 `YYYY--`）固定 **11 列一組**：`排序編號` 1–10 為十家銀行、11 為 `市場總計`
 - `Item` 欄寫法為「NN 名稱」（`01 中信` … `11 市場總計`），`Bank` 欄為簡稱；`年度`/`月份`/`季度` 是 Table 結構化公式，不要寫值
 - `市場總計` 列同時承載官方市場總計 13 欄、`平均每人持卡張數`（JCIC）、`市場總計` 與 TOP5/TOP10 占比公式
@@ -191,6 +191,14 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 ## 不要用這個 skill 的情況
 
 信用卡推薦、權益比較、回饋排行、申辦資格、行銷文案，以及與本資料夾揭露流程無關的通用問題。
+
+## 自動排程（Claude Routine）
+
+- 每月 15 日 11:00（台灣時間）：提醒排程檢查 main 根目錄是否已有目標月的 `中信信用卡<yyyymm>.xlsx`，沒有就推播提醒上傳。
+- 每月 15 日 17:30（台灣時間）：更新排程在新 session 照情境 A 跑完整流程，把 `銀行局信用卡公開資料.xlsx`
+  commit 到分支 `auto/monthly-update-<yyyymm>` 並開 PR 到 main，PR 內附 `verification`、`percent_audit`、失敗銀行與警告；
+  **不直接推 main**。中信檔缺少時以 `--allow-partial-summary` 先寫其餘 9 家並在 PR 註明。
+- 相依套件由 `.claude/hooks/session-start.sh`（`requirements.txt`：openpyxl、pypdf）在 session 啟動時安裝。
 
 ## 維護提醒
 
