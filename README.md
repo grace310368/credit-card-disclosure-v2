@@ -129,7 +129,11 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 - 儲存格本身是 % 格式時 raw 已是小數，直接保留；中信腳本在解析階段就轉小數並在 `metric_units` 宣告 `decimal_ratio`，
   `run_all_banks` 看到 `decimal_ratio` 不再除，整條管線只除一次
 - 備抵呆帳提足率（值恆 >1，如 `429.67` → `4.2967`）沿用 abs>1 才 /100 的啟發式
-- 先前被寫成 100 倍的既有儲存格不會被預設回補覆蓋，需要時對受影響月份跑 `--overwrite`
+- 兩層防護：(1) 三支 writer 寫入前以 `percent_utils.assert_percent_sane` 檢查範圍（逾期三個月比率 < 5%、六個月比率 < 2%、備抵呆帳提足率 20%–5000%），
+  超出即拒絕寫入並中止；`run_all_banks` 正規化後也檢查，異常銀行標為 `partial_success`。
+  (2) 主控腳本月更新結尾與 `--audit-percent` 全表稽核：市場總計列逾期比率不得超過十家銀行最大值的 10 倍
+  （十家皆 0 時不得超過 0.1%），異常列在 `percent_audit.anomalies`
+- 已寫入的錯值不會被預設回補覆蓋，修正方式是對受影響月份用金管會 ZIP 跑 `run_market_total.py --overwrite`
 
 ---
 

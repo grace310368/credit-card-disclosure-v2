@@ -21,7 +21,7 @@ from openpyxl import load_workbook
 sys.dont_write_bytecode = True
 
 from bank_aliases import BANK_BUREAU_ALIASES, BANK_NAMES, BANK_ORDER, MARKET_TOTAL_ITEM
-from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
+from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, assert_percent_sane, normalize_percent_value
 from workbook_block_helpers import (
     apply_default_font,
     canonical_block_item,
@@ -704,6 +704,7 @@ def write_bank_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str
             cell = ws.cell(row_no, column)
             value = item.get(field)
             if overwrite or is_blank(cell.value):
+                assert_percent_sane(field, value, context=f"YYYYMM={block_info['yyyymm']} {BANK_NAMES[bank_key]}")
                 cell.value = value
                 if value is not None:
                     apply_default_font(cell)

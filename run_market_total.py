@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 # 避免在唯讀執行沙箱中產生 __pycache__/*.pyc（會觸發 Refusing to overwrite）
 sys.dont_write_bytecode = True
 
-from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
+from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, assert_percent_sane, normalize_percent_value
 from bank_aliases import MARKET_TOTAL_ITEM
 from workbook_block_helpers import apply_default_font, canonical_block_item
 
@@ -625,6 +625,7 @@ def write_market_total_row(ws, row_no: int, index_map: dict[str, int], market: d
         cell = ws.cell(row_no, column)
         value = market.get(field)
         if overwrite or is_blank(cell.value):
+            assert_percent_sane(field, value, context=f"{market.get('month')} {MARKET_TOTAL_ITEM}")
             cell.value = value
             if cell.value is not None:
                 apply_default_font(cell)

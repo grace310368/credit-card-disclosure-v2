@@ -232,3 +232,48 @@ def copy_formula_cells(ws, src_row: int, dst_row: int, columns: list[int], *, ov
         apply_default_font(target)
         written.append(column)
     return written, skipped
+
+
+def audit_block_percent_ratios(ws, index_map: dict[str, int], block_info: dict[str, Any], fields: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+    """
+    寫入後稽核一個 block 的百分比欄：
+    1. 每格套 percent_sanity_error 的絕對範圍。
+    2. 市場總計列的逾期比率是全體發卡機構的加權平均，不可能比十家銀行最大值再高 10 倍以上，
+       反過來也不可能低於十家銀行最小非零值的 1/10（這能抓到 100 倍錯值，即使數值本身仍在絕對範圍內）。
+    回傳異常清單，空清單代表正常。
+    """
+    from percent_utils import percent_sanity_error  # 延後 import，避免與 percent_utils 互相依賴
+
+    anomalies: list[dict[str, Any]] = []
+    market_item = BLOCK_ITEMS[-1]
+    bank_items = BLOCK_ITEMS[:-1]
+
+    def numeric(row_no: int, column: int):
+        value = ws.cell(row_no, column).value
+        return float(value) if isinstance(value, (int, float)) else None
+
+    for field in fields:
+        column = index_map.get(field)
+        if column is None:
+            continue
+        market_flagged = False
+        for item, row_no in block_info['item_to_row'].items():
+            reason = percent_sanity_error(field, ws.cell(row_no, column).value)
+            if reason:
+                anomalies.append({'yyyymm': block_info['yyyymm'], 'row': row_no, 'item': item, 'field': field, 'value': ws.cell(row_no, column).value, 'reason': reason})
+                market_flagged = market_flagged or item == market_item
+        if not field.startswith('overdue_') or market_flagged:
+            continue
+        market = numeric(block_info['item_to_row'][market_item], column)
+        banks = [v for v in (numeric(block_info['item_to_row'][item], column) for item in bank_items) if v is not None]
+        if market is None or not banks:
+            continue
+        bank_max = max(banks)
+        bank_min_nonzero = min([v for v in banks if v > 0], default=None)
+        if bank_max > 0 and market > 10 * bank_max:
+            anomalies.append({'yyyymm': block_info['yyyymm'], 'row': block_info['item_to_row'][market_item], 'item': market_item, 'field': field, 'value': market, 'reason': f'市場總計 {market} 超過十家銀行最大值 {bank_max} 的 10 倍，疑似 100 倍錯值'})
+        elif bank_max == 0 and market > 0.001:
+            anomalies.append({'yyyymm': block_info['yyyymm'], 'row': block_info['item_to_row'][market_item], 'item': market_item, 'field': field, 'value': market, 'reason': f'十家銀行皆為 0 但市場總計 {market} 超過 0.1%，疑似 100 倍錯值'})
+        elif bank_min_nonzero is not None and 0 < market < bank_min_nonzero / 10:
+            anomalies.append({'yyyymm': block_info['yyyymm'], 'row': block_info['item_to_row'][market_item], 'item': market_item, 'field': field, 'value': market, 'reason': f'市場總計 {market} 低於十家銀行最小非零值 {bank_min_nonzero} 的 1/10，疑似被多除 100'})
+    return anomalies

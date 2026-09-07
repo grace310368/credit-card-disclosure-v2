@@ -80,7 +80,9 @@ input_files（9 個）：`creditcardinfo/Script/update_credit_card_workbook.py`�
 官網最新月通常領先金管會 ZIP 一個月：該月 ZIP 未發布時 backfill 記 `skip_missing_banks`、市場總計改用最新可得月，屬正常。
 
 **判讀結果（看步驟 5 的 stdout JSON，不要自己寫 openpyxl 驗證）**
-- `verification.status == "ok"` → 成功；`"mismatch"` → 列出 `mismatches` 回報使用者
+- `verification.status == "ok"` → 成功；`"mismatch"` → 列出 `mismatches` / `percent_anomalies` 回報使用者
+- `percent_audit.anomaly_count` 應為 0（全表百分比欄稽核）；非 0 就把 `anomalies` 列給使用者，用官方 ZIP 對該月跑 `--overwrite` 修正
+- 若腳本在寫入前就以「拒絕寫入 … 疑似百分比數字未除以 100」中止 → 來源格式變了，先修對應 parser，不要改工作簿、不要繞過檢查
 - `warnings` 有「資料月份與目標月不符，已跳過」屬正常（落後銀行交給 backfill），照實回報
 - 若一開始就報「**工作簿存在不完整的月 block…請先執行 --repair-partial-blocks**」→ 先跑情境 D 再重跑本步驟
 
@@ -165,6 +167,7 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 5. **結果判讀看 stdout JSON 的 `verification` 段**：不要手寫 openpyxl 逐格驗證；真要抽查只讀目標 `YYYYMM` 的 11 列。
 6. **多月份 data_month 不是錯誤**：update 取最新月為 target，落後銀行列進 `warnings` 留給 backfill。
 7. **timeout 數學**：run_all 循序執行，總時間 ≈ 銀行數 × `--timeout`，不可超過工具的 900 秒上限。
+8. **隨時稽核百分比欄**：`python creditcardinfo/Script/update_credit_card_workbook.py --workbook <工作簿> --audit-percent`（input_files：主控＋3 共用模組＋工作簿）只讀不寫，回報疑似 100 倍錯值的格。
 
 ---
 
@@ -179,6 +182,8 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
   唯一例外是儲存格本身是 % 格式（如中信 xlsx raw `0.0012`）→ 直接保留。中信腳本這兩欄在解析階段已轉小數，
   `metric_units` 宣告 `decimal_ratio`。工作簿出現 `0.12`（顯示 12%）、`17`、`85659` 這類值代表 parser 壞了要先修；
   備抵呆帳提足率（值恆 >1，如 `429.67`→`4.2967`）沿用 abs>1 才 /100 的啟發式
+- **百分比防護**：寫入工作簿前逾期三個月比率 < 5%、六個月比率 < 2%、備抵呆帳提足率 20%–5000%，否則腳本拒絕寫入並中止；
+  月更新結尾與 `--audit-percent` 另做相對檢查：市場總計列的逾期比率不得超過十家銀行最大值的 10 倍（或十家皆 0 時超過 0.1%）
 - **中信來源檔 14 個項目順序固定**（流通卡數→有效卡數→當月發卡數→當月停卡數→循環信用餘額→當月簽帳金額→
   當月預借現金金額→逾期三個月比率→逾期六個月比率→備抵呆帳提足率→當月轉銷呆帳金額→當年度累計轉銷呆帳金額→
   未到期分期付款餘額→當月轉帳卡簽帳金額），照固定順序抓

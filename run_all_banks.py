@@ -332,6 +332,32 @@ def parse_number(value: Any) -> int | float | None:
 # vendored from percent_utils.py — 修改時請與 percent_utils.py 同步
 # 來源一律是百分比顯示數字（0.12 代表 0.12%）、且典型值 < 1 的欄位：
 # 解析時必須用 force_percent_input=True，不可依賴 abs > 1 的啟發式。
+# 與 percent_utils.PERCENT_SANITY_BOUNDS 同步維護：小數比率的可信範圍 (nonzero_min, max)
+PERCENT_SANITY_BOUNDS = {
+    "overdue_3m_ratio_percent": (0.00005, 0.05),
+    "overdue_6m_ratio_percent": (None, 0.02),
+    "allowance_coverage_ratio_percent": (0.2, 50.0),
+}
+
+
+def percent_sanity_error(field: str, value: Any) -> str | None:
+    bounds = PERCENT_SANITY_BOUNDS.get(field)
+    if bounds is None or value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f"{field} 不是數字：{value!r}"
+    nonzero_min, maximum = bounds
+    if number < 0:
+        return f"{field} 為負值：{number}"
+    if number > maximum:
+        return f"{field}={number}（顯示 {number * 100:.2f}%）超過上限，疑似百分比數字未除以 100"
+    if nonzero_min is not None and 0 < number < nonzero_min:
+        return f"{field}={number} 低於下限，疑似小數比率被重複除以 100"
+    return None
+
+
 FORCE_PERCENT_INPUT_FIELDS = {
     "overdue_3m_ratio_percent",
     "overdue_6m_ratio_percent",
@@ -435,6 +461,12 @@ def normalize_metrics(result: dict[str, Any]) -> dict[str, Any]:
                 metrics[key] = normalize_percent_value(metrics.get(key), force_percent_input=True)
             else:
                 metrics[key] = normalize_percent_value(metrics.get(key), assume_percent_input=source_unit == "%")
+            # 正規化後仍不在可信範圍 → 來源格式可能變了；提早標記，讓步驟 4 的 partial_success_count 看得到
+            reason = percent_sanity_error(key, metrics.get(key))
+            if reason:
+                result.setdefault("errors", []).append({"stage": "normalize_percent", "message": reason})
+                if result.get("status") == "success":
+                    result["status"] = "partial_success"
 
     # 金額類欄位：由仟元轉成百萬元，新增 *_million 欄位
     for source_key, target_key in AMOUNT_METRIC_CONVERSIONS.items():

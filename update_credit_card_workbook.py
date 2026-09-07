@@ -15,10 +15,11 @@ from openpyxl import load_workbook
 sys.dont_write_bytecode = True
 
 from bank_aliases import BANK_NAMES, BANK_ORDER, BLOCK_ITEMS, BLOCK_SIZE, MARKET_TOTAL_ITEM, SPECIAL_ITEMS, year_block_key
-from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
+from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, assert_percent_sane, normalize_percent_value
 from workbook_block_helpers import (
     append_year_block as shared_append_year_block,
     apply_default_font,
+    audit_block_percent_ratios,
     canonical_block_item,
     copy_formula_cells,
     find_block,
@@ -592,6 +593,7 @@ def write_bank_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str
             column = index_map.get(field)
             if column is None:
                 continue
+            assert_percent_sane(field, item.get(field), context=f"{target_month or ''} {BANK_NAMES[bank_key]}".strip())
             cell = ws.cell(row_no, column)
             cell.value = item.get(field)
             if cell.value is not None:
@@ -864,6 +866,21 @@ def auto_sync_annual_if_ready(ws, index_map: dict[str, int], ad_year_value: int)
     }
 
 
+def audit_percent_ratios(ws, index_map: dict[str, int]) -> dict[str, Any]:
+    """掃描所有完整月 block 的百分比欄（絕對範圍＋市場總計 vs 十家銀行相對檢查），回報異常格。"""
+    anomalies: list[dict[str, Any]] = []
+    audited = 0
+    for yyyymm, rows in sorted(collect_month_row_groups(ws, index_map).items()):
+        if classify_month_rows(ws, index_map, yyyymm, rows) != "full_block":
+            continue
+        block_info = find_month_block(ws, index_map, yyyymm)
+        if block_info is None:
+            continue
+        audited += 1
+        anomalies.extend(audit_block_percent_ratios(ws, index_map, block_info, sorted(PERCENT_DECIMAL_FIELDS)))
+    return {"blocks_audited": audited, "anomaly_count": len(anomalies), "anomalies": anomalies}
+
+
 def verify_written_block(workbook_path: Path, target_month: str, results: dict[str, dict[str, Any]] | None, skipped_banks: list[str]) -> dict[str, Any]:
     # 存檔後重新載入工作簿做讀回驗證，避免只憑 in-memory 狀態與委派腳本 stdout 判定成功。
     roc_year, month_number = parse_roc_month(target_month)
@@ -924,13 +941,15 @@ def verify_written_block(workbook_path: Path, target_month: str, results: dict[s
                 entry["avg_cards_per_person"] = ws.cell(row_no, index_map["avg_cards_per_person"]).value
             special_rows[item_name] = entry
 
+        percent_anomalies = audit_block_percent_ratios(ws, index_map, block_info, sorted(PERCENT_DECIMAL_FIELDS))
         return {
-            "status": "ok" if not mismatches else "mismatch",
+            "status": "ok" if not mismatches and not percent_anomalies else "mismatch",
             "yyyymm": yyyymm,
             "block_start_row": block_info["start_row"],
             "block_rows": len(block_info["rows"]),
             "verified_banks": verified_banks,
             "mismatches": mismatches,
+            "percent_anomalies": percent_anomalies,
             "special_rows": special_rows,
         }
     finally:
@@ -1214,6 +1233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--annual-only", action="store_true", help="只執行年度整理；若未指定月份，會嘗試整理工作簿中所有完整年度")
     parser.add_argument("--skip-annual-sync", action="store_true", help="月資料更新完成後不自動整理年度資料")
+    parser.add_argument("--audit-percent", action="store_true", help="只稽核、不寫入：掃描全表百分比欄（逾期比率、備抵呆帳提足率）的絕對範圍與市場總計 vs 十家銀行的相對關係，回報疑似 100 倍錯值")
     parser.add_argument("--repair-partial-blocks", action="store_true", help="偵測並刪除不完整的月 block 孤兒列（非 11 列一組）；只處理位於工作簿尾端、不影響其他列位置的 partial block，刪除前會在輸出 JSON 回報被移除的值")
     return parser
 
@@ -1234,6 +1254,19 @@ def main() -> None:
 
     explicit_target_month = roc_month_text(*parse_roc_month(args.target_month)) if args.target_month else None
     explicit_base_month = roc_month_text(*parse_roc_month(args.base_month)) if args.base_month else None
+
+    if args.audit_percent:
+        wb = load_workbook(workbook_path)
+        ws = get_main_sheet(wb)
+        index_map = header_index_map(ws, FIELD_ALIASES)
+        require_headers(index_map, ["yyyymm", "rank", "item"], MAIN_SHEET)
+        output["percent_audit"] = audit_percent_ratios(ws, index_map)
+        if output["percent_audit"]["anomaly_count"]:
+            warnings.append("百分比欄稽核發現異常格，請檢查 percent_audit.anomalies；修正方式：對該月用金管會 ZIP 跑 run_market_total.py --overwrite 或 backfill --overwrite")
+        if warnings:
+            output["warnings"] = warnings
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+        return
 
     if args.repair_partial_blocks:
         wb = load_workbook(workbook_path)
@@ -1380,6 +1413,17 @@ def main() -> None:
         output["verification"] = verify_written_block(workbook_path, target_month, results, skipped_banks)
 
     output["item_label_fix_summary"] = item_label_fix_summary
+
+    # 月更新結尾全表稽核百分比欄：抓出任何來源/腳本改版造成的 100 倍錯值。
+    if not args.market_only:
+        wb = load_workbook(workbook_path)
+        try:
+            ws = get_main_sheet(wb)
+            output["percent_audit"] = audit_percent_ratios(ws, header_index_map(ws, FIELD_ALIASES))
+        finally:
+            wb.close()
+        if output["percent_audit"]["anomaly_count"]:
+            warnings.append("百分比欄稽核發現異常格（percent_audit.anomalies），請回報使用者並用官方 ZIP --overwrite 修正該月")
 
     if warnings:
         output["warnings"] = warnings
