@@ -5,85 +5,41 @@ import json
 import re
 import subprocess
 import sys
-from copy import copy
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.formula.translate import Translator
 
 # 避免在唯讀執行沙箱中產生 __pycache__/*.pyc（會觸發 Refusing to overwrite）
 sys.dont_write_bytecode = True
 
-from bank_aliases import BANK_ITEM_ALIASES, ITEM_RANKS
-from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, normalize_percent_value
+from bank_aliases import BANK_NAMES, BANK_ORDER, BLOCK_ITEMS, BLOCK_SIZE, MARKET_TOTAL_ITEM, SPECIAL_ITEMS, year_block_key
+from percent_utils import PERCENT_DECIMAL_FIELDS, apply_percent_number_format, assert_percent_sane, normalize_percent_value
 from workbook_block_helpers import (
-    append_month_block as shared_append_month_block,
-    canonical_block_item as shared_canonical_block_item,
-    copy_row_style as shared_copy_row_style,
+    append_year_block as shared_append_year_block,
+    apply_default_font,
+    audit_block_percent_ratios,
+    canonical_block_item,
+    copy_formula_cells,
+    find_block,
     find_month_block as shared_find_month_block,
     find_or_create_month_block as shared_find_or_create_month_block,
+    normalize_item_labels,
     refresh_block_metadata as shared_refresh_block_metadata,
-    set_block_row_metadata as shared_set_block_row_metadata,
-    set_row_value_if_present as shared_set_row_value_if_present,
-    validate_block_items as shared_validate_block_items,
-    apply_default_font,
+    validate_block_items,
 )
 
 WORKBOOK_DEFAULT = "銀行局信用卡公開資料.xlsx"
 MAIN_SHEET = "歷史資料(年+月)"
-BLOCK_SIZE = 13
-
-BANK_ORDER = ["ctbc", "fubon", "cathay", "esun", "taishin", "dbs", "ubot", "sinopac", "firstbank", "feib"]
-BANK_NAMES = {
-    "ctbc": "中信",
-    "fubon": "富邦",
-    "cathay": "國泰",
-    "esun": "玉山",
-    "taishin": "台新",
-    "dbs": "星展",
-    "ubot": "聯邦",
-    "sinopac": "永豐",
-    "firstbank": "第一",
-    "feib": "遠東",
-}
-MARKET_TOTAL_ITEM = "市場總計(銀行局)"
-BANK_BUREAU_ITEM = "銀行局"
-JCIC_ITEM = "財團法人金融聯合徵信中心"
-SPECIAL_ITEMS = [MARKET_TOTAL_ITEM, BANK_BUREAU_ITEM, JCIC_ITEM]
-BLOCK_ITEMS = [BANK_NAMES[key] for key in BANK_ORDER] + SPECIAL_ITEMS
-
-def canonical_block_item(value: Any) -> str:
-    return shared_canonical_block_item(
-        value,
-        special_items=SPECIAL_ITEMS,
-        bank_names=BANK_NAMES,
-        bank_item_aliases=BANK_ITEM_ALIASES,
-    )
-
-
-def normalize_item_labels(ws, index_map: dict[str, int]) -> dict[str, Any]:
-    """把歷史資料與新寫入的 Item 全部統一成簡稱。"""
-    item_col = index_map.get("item")
-    if item_col is None:
-        return {"changed_count": 0, "changed_rows": []}
-    changed_rows: list[dict[str, Any]] = []
-    for row_no in range(2, ws.max_row + 1):
-        raw_value = ws.cell(row_no, item_col).value
-        normalized = canonical_block_item(raw_value)
-        raw_text = str(raw_value or "").strip()
-        if normalized != raw_text:
-            ws.cell(row_no, item_col).value = normalized
-            changed_rows.append({"row": row_no, "from": raw_text, "to": normalized})
-    return {"changed_count": len(changed_rows), "changed_rows": changed_rows}
-
 
 FIELD_ALIASES = {
     "yyyymm": ["YYYYMM"],
     "ad_year": ["年度"],
     "month_number": ["月份"],
     "rank": ["Rank", "排序編號"],
+    "bank": ["Bank"],
     "item": ["Item"],
     "circulating_cards": ["流通卡數"],
     "valid_cards": ["有效卡數"],
@@ -190,17 +146,16 @@ ANNUAL_SUM_FIELDS = [
     "debit_card_signed_amount_million",
 ]
 
-ANNUAL_REQUIRED_MONTHLY_ITEMS = [
-    BANK_NAMES[key] for key in BANK_ORDER
-] + ["市場總計(銀行局)", "財團法人金融聯合徵信中心"]
+ANNUAL_REQUIRED_MONTHLY_ITEMS = BLOCK_ITEMS
 
 ANNUAL_REQUIRED_MONTHLY_FIELDS = {
     **{BANK_NAMES[key]: SUMMARY_REQUIRED_FIELDS for key in BANK_ORDER},
-    "市場總計(銀行局)": SUMMARY_REQUIRED_FIELDS,
-    "財團法人金融聯合徵信中心": ["avg_cards_per_person"],
+    MARKET_TOTAL_ITEM: SUMMARY_REQUIRED_FIELDS + ["avg_cards_per_person"],
 }
 
-ANNUAL_BANK_BUREAU_FORMULA_FIELDS = {
+# 市場總計列上的公式欄：市場總計（SUMIFS）與 TOP5/TOP10 占比；值為 (分子指標欄, top_n)，供無公式樣板時改算數值。
+MARKET_ROW_FORMULA_FIELDS = {
+    "market_total": ("circulating_cards", 0),
     "top5_circulating_cards": ("circulating_cards", 5),
     "top10_circulating_cards": ("circulating_cards", 10),
     "top5_valid_cards": ("valid_cards", 5),
@@ -389,7 +344,7 @@ def merged_record(rec: dict[str, Any]) -> dict[str, Any]:
 
 def load_summary_results(summary_path: Path, allow_partial: bool = False) -> dict[str, dict[str, Any]]:
     if summary_path.suffix.lower() != ".json":
-        raise ValueError(f"--summary 目前應提供 JSON 檔，不再讀取 xlsx：{summary_path}")
+        raise ValueError(f"--summary 必須是 JSON 檔：{summary_path}")
     with summary_path.open("r", encoding="utf-8-sig") as handle:
         payload = json.load(handle)
 
@@ -494,8 +449,7 @@ def infer_target_month_from_results(results: dict[str, dict[str, Any]]) -> str:
         months.add(parse_roc_month(str(data_month)))
     if not months:
         raise ValueError("summary JSON 中找不到可推定 target month 的 data_month")
-    # 各家銀行公布時間不同，可能出現多個月份。取「最新月」為 target，
-    # 其餘落後月份留給 backfill 處理，而不是直接報錯中止整條流程。
+    # 各家銀行公布時間不同，取最新月為 target，落後月份留給 backfill。
     year, month = max(months)
     return roc_month_text(year, month)
 
@@ -508,69 +462,16 @@ def determine_backfill_base_month(target_month: str | None, results: dict[str, d
     return None
 
 
-def build_block_header_values(ad_year_value: int, month_number: int) -> dict[str, Any]:
-    return {
-        "yyyymm": ad_year_value * 100 + month_number,
-        "ad_year": ad_year_value,
-        "month_number": month_number,
-    }
-
-
-def copy_row_style(ws, src_row: int, dst_row: int) -> None:
-    shared_copy_row_style(ws, src_row, dst_row)
-
-
-def set_row_value_if_present(ws, row_no: int, index_map: dict[str, int], field: str, value: Any) -> None:
-    shared_set_row_value_if_present(ws, row_no, index_map, field, value)
-
-
-def set_block_row_metadata(ws, row_no: int, index_map: dict[str, int], *, yyyymm: int, ad_year: int, month_number: int | str, rank: int | None, item: str) -> None:
-    shared_set_block_row_metadata(
-        ws, row_no, index_map, yyyymm=yyyymm, ad_year=ad_year, month_number=month_number, rank=rank, item=canonical_block_item(item)
-    )
-
-
-def validate_block_items(ws, index_map: dict[str, int], rows: list[int], yyyymm: int) -> dict[str, int]:
-    if len(rows) != BLOCK_SIZE:
-        raise ValueError(f"YYYYMM={yyyymm} 的 block 列數不是 {BLOCK_SIZE}：實際 {len(rows)} 列")
-    expected_rows = list(range(rows[0], rows[0] + BLOCK_SIZE))
-    if rows != expected_rows:
-        raise ValueError(f"YYYYMM={yyyymm} 的 block 不是連續 {BLOCK_SIZE} 列：{rows}")
-
-    item_to_row: dict[str, int] = {}
-    for offset, expected_item in enumerate(BLOCK_ITEMS):
-        row_no = rows[offset]
-        actual_item = canonical_block_item(ws.cell(row_no, index_map["item"]).value)
-        if actual_item != expected_item:
-            raise ValueError(
-                f"YYYYMM={yyyymm} 的 block Item 不符合固定模板：row {row_no} 預期 {expected_item!r}，實際 {ws.cell(row_no, index_map["item"]).value!r}"
-            )
-        item_to_row[expected_item] = row_no
-    return item_to_row
-
-
 def find_month_block(ws, index_map: dict[str, int], yyyymm: int) -> dict[str, Any] | None:
-    return shared_find_month_block(
-        ws, index_map, yyyymm, normalize_yyyymm=normalize_yyyymm, block_items=BLOCK_ITEMS, canonicalize_item=canonical_block_item, block_label='block '
-    )
-
-
-def append_month_block(ws, index_map: dict[str, int], ad_year: int, month_number: int) -> dict[str, Any]:
-    return shared_append_month_block(
-        ws, index_map, ad_year=ad_year, month_number=month_number, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS
-    )
+    return shared_find_month_block(ws, index_map, yyyymm, normalize_yyyymm=normalize_yyyymm)
 
 
 def find_or_create_month_block(ws, index_map: dict[str, int], ad_year: int, month_number: int) -> dict[str, Any]:
-    return shared_find_or_create_month_block(
-        ws, index_map, ad_year=ad_year, month_number=month_number, normalize_yyyymm=normalize_yyyymm, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS, canonicalize_item=canonical_block_item, block_label='block '
-    )
+    return shared_find_or_create_month_block(ws, index_map, ad_year=ad_year, month_number=month_number, normalize_yyyymm=normalize_yyyymm)
 
 
 def refresh_block_metadata(ws, index_map: dict[str, int], block_info: dict[str, Any], ad_year: int, month_number: int) -> None:
-    shared_refresh_block_metadata(
-        ws, index_map, block_info, ad_year=ad_year, month_number=month_number, block_items=BLOCK_ITEMS, bank_ranks=ITEM_RANKS
-    )
+    shared_refresh_block_metadata(ws, index_map, block_info, ad_year=ad_year, month_number=month_number)
 
 
 def collect_month_row_groups(ws, index_map: dict[str, int]) -> dict[int, list[int]]:
@@ -693,6 +594,7 @@ def write_bank_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str
             column = index_map.get(field)
             if column is None:
                 continue
+            assert_percent_sane(field, item.get(field), context=f"{target_month or ''} {BANK_NAMES[bank_key]}".strip())
             cell = ws.cell(row_no, column)
             cell.value = item.get(field)
             if cell.value is not None:
@@ -712,68 +614,23 @@ def write_bank_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str
 
 
 def normalize_year_value(value: Any) -> int | None:
+    """年度 block 的 YYYYMM 欄：'2025--'（現行寫法）或 2025 / '2025'（舊寫法）。"""
     if value is None:
         return None
     if isinstance(value, int):
         return value if 1900 <= value <= 2999 else None
     if isinstance(value, float) and value.is_integer():
         return normalize_year_value(int(value))
-    text = str(value).strip()
-    if re.fullmatch(r"20\d{2}", text):
-        return int(text)
-    return None
+    m = re.fullmatch(r"(20\d{2})(?:--)?", str(value).strip())
+    return int(m.group(1)) if m else None
 
 
 def find_year_block(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any] | None:
-    rows = [
-        row_no
-        for row_no in range(2, ws.max_row + 1)
-        if normalize_year_value(ws.cell(row_no, index_map["yyyymm"]).value) == ad_year_value
-    ]
-    if not rows:
-        return None
-    item_to_row = validate_block_items(ws, index_map, rows, ad_year_value)
-    return {
-        "yyyymm": ad_year_value,
-        "start_row": rows[0],
-        "rows": rows,
-        "item_to_row": item_to_row,
-        "created": False,
-    }
+    return find_block(ws, index_map, year_block_key(ad_year_value), match=lambda v: normalize_year_value(v) == ad_year_value, block_label="年度 block ")
 
 
 def append_year_block(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any]:
-    old_max_row = ws.max_row
-    start_row = old_max_row + 1
-    style_template_start = old_max_row - BLOCK_SIZE + 1 if old_max_row >= BLOCK_SIZE + 1 else None
-    item_to_row: dict[str, int] = {}
-    rows: list[int] = []
-
-    for offset, item in enumerate(BLOCK_ITEMS):
-        row_no = start_row + offset
-        if style_template_start and style_template_start >= 2:
-            copy_row_style(ws, style_template_start + offset, row_no)
-        rank = ITEM_RANKS.get(item)
-        set_block_row_metadata(
-            ws,
-            row_no,
-            index_map,
-            yyyymm=ad_year_value,
-            ad_year=ad_year_value,
-            month_number="Total",
-            rank=rank,
-            item=item,
-        )
-        item_to_row[item] = row_no
-        rows.append(row_no)
-
-    return {
-        "yyyymm": ad_year_value,
-        "start_row": start_row,
-        "rows": rows,
-        "item_to_row": item_to_row,
-        "created": True,
-    }
+    return shared_append_year_block(ws, index_map, ad_year=ad_year_value)
 
 
 def find_or_create_year_block(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any]:
@@ -784,19 +641,7 @@ def find_or_create_year_block(ws, index_map: dict[str, int], ad_year_value: int)
 
 
 def refresh_year_block_metadata(ws, index_map: dict[str, int], block_info: dict[str, Any], ad_year_value: int) -> None:
-    for item in BLOCK_ITEMS:
-        row_no = block_info["item_to_row"][item]
-        rank = ITEM_RANKS.get(item)
-        set_block_row_metadata(
-            ws,
-            row_no,
-            index_map,
-            yyyymm=ad_year_value,
-            ad_year=ad_year_value,
-            month_number="Total",
-            rank=rank,
-            item=item,
-        )
+    shared_refresh_block_metadata(ws, index_map, block_info, ad_year=ad_year_value, month_number="--")
 
 
 def monthly_blocks_by_year(ws, index_map: dict[str, int], ad_year_value: int) -> dict[int, dict[str, Any]]:
@@ -816,10 +661,7 @@ def get_cell_numeric(ws, row_no: int, index_map: dict[str, int], field: str) -> 
 
 
 def year_completeness_report(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any]:
-    # 年度完整性規則：
-    # 1) 同一年 1–12 月 block 必須都存在
-    # 2) 年度整理需要的關鍵月資料欄位不可為空
-    # 這個檢查只服務於主控腳本的年度同步，不是各腳本都要各自複製的邏輯。
+    # 年度完整性：同一年 1–12 月 block 都存在，且年度整理需要的月資料欄位不可為空。
     month_blocks = monthly_blocks_by_year(ws, index_map, ad_year_value)
     missing_months = [month for month in range(1, 13) if month not in month_blocks]
     missing_details: list[dict[str, Any]] = []
@@ -889,19 +731,20 @@ def build_annual_record_for_item(ws, month_blocks: dict[int, dict[str, Any]], in
 
 
 def find_annual_formula_source_row(ws, index_map: dict[str, int], target_year: int) -> int | None:
+    """找最接近年度的其他年度 block 市場總計列（帶 TOP 公式）當公式樣板。"""
     candidates: list[tuple[int, int]] = []
     for row_no in range(2, ws.max_row + 1):
-        if str(ws.cell(row_no, index_map["item"]).value or "").strip() != "銀行局":
+        if canonical_block_item(ws.cell(row_no, index_map["item"]).value) != MARKET_TOTAL_ITEM:
             continue
-        yyyymm = normalize_year_value(ws.cell(row_no, index_map["yyyymm"]).value)
-        if yyyymm is None or yyyymm == target_year:
+        year_value = normalize_year_value(ws.cell(row_no, index_map["yyyymm"]).value)
+        if year_value is None or year_value == target_year:
             continue
         if any(
             ws.cell(row_no, index_map[field]).data_type == "f" and isinstance(ws.cell(row_no, index_map[field]).value, str)
-            for field in ANNUAL_BANK_BUREAU_FORMULA_FIELDS
+            for field in MARKET_ROW_FORMULA_FIELDS
             if field in index_map
         ):
-            candidates.append((abs(yyyymm - target_year), row_no))
+            candidates.append((abs(year_value - target_year), row_no))
     if not candidates:
         return None
     candidates.sort(key=lambda x: x[0])
@@ -912,10 +755,10 @@ def annual_bank_bureau_ratio(ws, month_blocks: dict[int, dict[str, Any]], index_
     if field in {"circulating_cards", "valid_cards", "revolving_balance_million"}:
         if 12 not in month_blocks:
             return None
-        denominator = get_cell_numeric(ws, month_blocks[12]["item_to_row"]["市場總計(銀行局)"], index_map, field)
+        denominator = get_cell_numeric(ws, month_blocks[12]["item_to_row"][MARKET_TOTAL_ITEM], index_map, field)
         values = [get_cell_numeric(ws, month_blocks[12]["item_to_row"][BANK_NAMES[key]], index_map, field) for key in BANK_ORDER]
     elif field in {"new_cards_this_month", "cancelled_cards_this_month", "signed_amount_million"}:
-        denominator = sum_monthly_field(ws, month_blocks, index_map, "市場總計(銀行局)", field)
+        denominator = sum_monthly_field(ws, month_blocks, index_map, MARKET_TOTAL_ITEM, field)
         values = [sum_monthly_field(ws, month_blocks, index_map, BANK_NAMES[key], field) for key in BANK_ORDER]
     else:
         return None
@@ -925,35 +768,14 @@ def annual_bank_bureau_ratio(ws, month_blocks: dict[int, dict[str, Any]], index_
     return sum(usable[:top_n]) / float(denominator)
 
 
-def repair_annual_bank_bureau_formulas(ws, index_map: dict[str, int], block_info: dict[str, Any]) -> dict[str, Any]:
-    target_row = block_info["item_to_row"]["銀行局"]
-    source_row = find_annual_formula_source_row(ws, index_map, block_info["yyyymm"])
+def repair_annual_market_row_formulas(ws, index_map: dict[str, int], block_info: dict[str, Any]) -> dict[str, Any]:
+    target_row = block_info["item_to_row"][MARKET_TOTAL_ITEM]
+    source_row = find_annual_formula_source_row(ws, index_map, normalize_year_value(block_info["yyyymm"]))
     if source_row is None:
         return {"formula_source_row": None, "formulas_written": []}
-    formulas_written: list[str] = []
-    for field in ANNUAL_BANK_BUREAU_FORMULA_FIELDS:
-        column = index_map.get(field)
-        if column is None:
-            continue
-        source = ws.cell(source_row, column)
-        target = ws.cell(target_row, column)
-        if not (source.data_type == "f" and isinstance(source.value, str) and source.value.strip()):
-            continue
-        try:
-            target.value = Translator(source.value, origin=source.coordinate).translate_formula(target.coordinate)
-        except Exception:
-            target.value = source.value
-        apply_default_font(target)
-        if source.has_style:
-            target._style = copy(source._style)
-        target.font = copy(source.font)
-        target.fill = copy(source.fill)
-        target.border = copy(source.border)
-        target.alignment = copy(source.alignment)
-        target.protection = copy(source.protection)
-        target.number_format = source.number_format
-        formulas_written.append(field)
-    return {"formula_source_row": source_row, "formulas_written": formulas_written}
+    columns = {index_map[field]: field for field in MARKET_ROW_FORMULA_FIELDS if field in index_map}
+    written, _ = copy_formula_cells(ws, source_row, target_row, list(columns), overwrite=True)
+    return {"formula_source_row": source_row, "formulas_written": [columns[c] for c in written]}
 
 
 def write_annual_rows_to_block(ws, index_map: dict[str, int], block_info: dict[str, Any], month_blocks: dict[int, dict[str, Any]]) -> dict[str, Any]:
@@ -978,8 +800,8 @@ def write_annual_rows_to_block(ws, index_map: dict[str, int], block_info: dict[s
             fields_written.append(field)
         written_items[item_name] = fields_written
 
-    market_row = block_info["item_to_row"]["市場總計(銀行局)"]
-    market_record = build_annual_record_for_item(ws, month_blocks, index_map, "市場總計(銀行局)")
+    market_row = block_info["item_to_row"][MARKET_TOTAL_ITEM]
+    market_record = build_annual_record_for_item(ws, month_blocks, index_map, MARKET_TOTAL_ITEM)
     market_written: list[str] = []
     for field, value in market_record.items():
         column = index_map.get(field)
@@ -987,58 +809,41 @@ def write_annual_rows_to_block(ws, index_map: dict[str, int], block_info: dict[s
             continue
         cell = ws.cell(market_row, column)
         cell.value = value
+        if cell.value is not None:
+            apply_default_font(cell)
         if field in PERCENT_DISPLAY_FIELDS and cell.value is not None:
             apply_percent_number_format(cell)
         elif field in INTEGER_DISPLAY_FIELDS and cell.value is not None:
             apply_integer_number_format(cell)
         market_written.append(field)
-    written_items["市場總計(銀行局)"] = market_written
+    if "avg_cards_per_person" in index_map:
+        value = december_field_value(ws, month_blocks, index_map, MARKET_TOTAL_ITEM, "avg_cards_per_person")
+        avg_cell = ws.cell(market_row, index_map["avg_cards_per_person"])
+        avg_cell.value = value
+        if value is not None:
+            apply_default_font(avg_cell)
+        market_written.append("avg_cards_per_person")
 
-    bank_bureau_row = block_info["item_to_row"]["銀行局"]
-    bank_bureau_written: list[str] = []
-    if "market_total" in index_map:
-        dec_market_total = december_field_value(ws, month_blocks, index_map, "銀行局", "market_total")
-        if dec_market_total is None:
-            dec_market_total = december_field_value(ws, month_blocks, index_map, "市場總計(銀行局)", "circulating_cards")
-        bank_total_cell = ws.cell(bank_bureau_row, index_map["market_total"])
-        bank_total_cell.value = dec_market_total
-        if dec_market_total is not None:
-            apply_default_font(bank_total_cell)
-        bank_bureau_written.append("market_total")
-    formula_result = repair_annual_bank_bureau_formulas(ws, index_map, block_info)
-    if not formula_result["formulas_written"]:
-        for formula_field in ANNUAL_BANK_BUREAU_FORMULA_FIELDS:
+    # 市場總計 / TOP5 / TOP10 欄優先複製其他年度 block 的公式；沒有樣板時改寫計算值。
+    formula_result = repair_annual_market_row_formulas(ws, index_map, block_info)
+    if formula_result["formulas_written"]:
+        market_written.extend(formula_result["formulas_written"])
+    else:
+        for formula_field, (metric_field, top_n) in MARKET_ROW_FORMULA_FIELDS.items():
             column = index_map.get(formula_field)
             if column is None:
                 continue
-            base_field = formula_field.replace('top5_', '').replace('top10_', '')
-            mapping = {
-                'circulating_cards':'circulating_cards','valid_cards':'valid_cards','new_cards':'new_cards_this_month',
-                'cancelled_cards':'cancelled_cards_this_month','revolving_balance':'revolving_balance_million','signed_amount':'signed_amount_million'
-            }
-            metric_field = mapping[base_field]
-            top_n = 5 if 'top5_' in formula_field else 10
-            value = annual_bank_bureau_ratio(ws, month_blocks, index_map, metric_field, top_n)
-            cell = ws.cell(bank_bureau_row, column)
-            cell.value = value
-            apply_percent_number_format(cell)
-            bank_bureau_written.append(formula_field)
-    else:
-        bank_bureau_written.extend(formula_result["formulas_written"])
-    written_items["銀行局"] = bank_bureau_written
+            cell = ws.cell(market_row, column)
+            if top_n == 0:
+                cell.value = december_field_value(ws, month_blocks, index_map, MARKET_TOTAL_ITEM, metric_field)
+            else:
+                cell.value = annual_bank_bureau_ratio(ws, month_blocks, index_map, metric_field, top_n)
+                apply_percent_number_format(cell)
+            apply_default_font(cell)
+            market_written.append(formula_field)
+    written_items[MARKET_TOTAL_ITEM] = market_written
 
-    jcic_row = block_info["item_to_row"]["財團法人金融聯合徵信中心"]
-    jcic_written: list[str] = []
-    if "avg_cards_per_person" in index_map:
-        value = december_field_value(ws, month_blocks, index_map, "財團法人金融聯合徵信中心", "avg_cards_per_person")
-        jcic_cell = ws.cell(jcic_row, index_map["avg_cards_per_person"])
-        jcic_cell.value = value
-        if value is not None:
-            apply_default_font(jcic_cell)
-        jcic_written.append("avg_cards_per_person")
-    written_items["財團法人金融聯合徵信中心"] = jcic_written
-
-    return {"written_items": written_items, "bank_bureau_formula_result": formula_result}
+    return {"written_items": written_items, "market_row_formula_result": formula_result}
 
 
 def auto_sync_annual_if_ready(ws, index_map: dict[str, int], ad_year_value: int) -> dict[str, Any]:
@@ -1060,6 +865,21 @@ def auto_sync_annual_if_ready(ws, index_map: dict[str, int], ad_year_value: int)
         "block_start_row": block_info["start_row"],
         **write_summary,
     }
+
+
+def audit_percent_ratios(ws, index_map: dict[str, int]) -> dict[str, Any]:
+    """掃描所有完整月 block 的百分比欄（絕對範圍＋市場總計 vs 十家銀行相對檢查），回報異常格。"""
+    anomalies: list[dict[str, Any]] = []
+    audited = 0
+    for yyyymm, rows in sorted(collect_month_row_groups(ws, index_map).items()):
+        if classify_month_rows(ws, index_map, yyyymm, rows) != "full_block":
+            continue
+        block_info = find_month_block(ws, index_map, yyyymm)
+        if block_info is None:
+            continue
+        audited += 1
+        anomalies.extend(audit_block_percent_ratios(ws, index_map, block_info, sorted(PERCENT_DECIMAL_FIELDS)))
+    return {"blocks_audited": audited, "anomaly_count": len(anomalies), "anomalies": anomalies}
 
 
 def verify_written_block(workbook_path: Path, target_month: str, results: dict[str, dict[str, Any]] | None, skipped_banks: list[str]) -> dict[str, Any]:
@@ -1114,21 +934,23 @@ def verify_written_block(workbook_path: Path, target_month: str, results: dict[s
             non_blank = sum(
                 1
                 for field, column in index_map.items()
-                if field not in ("yyyymm", "ad_year", "month_number", "rank", "item")
+                if field not in ("yyyymm", "ad_year", "month_number", "rank", "bank", "item")
                 and not is_blank(ws.cell(row_no, column).value)
             )
             entry: dict[str, Any] = {"row": row_no, "non_blank_fields": non_blank}
-            if item_name == JCIC_ITEM and "avg_cards_per_person" in index_map:
+            if "avg_cards_per_person" in index_map:
                 entry["avg_cards_per_person"] = ws.cell(row_no, index_map["avg_cards_per_person"]).value
             special_rows[item_name] = entry
 
+        percent_anomalies = audit_block_percent_ratios(ws, index_map, block_info, sorted(PERCENT_DECIMAL_FIELDS))
         return {
-            "status": "ok" if not mismatches else "mismatch",
+            "status": "ok" if not mismatches and not percent_anomalies else "mismatch",
             "yyyymm": yyyymm,
             "block_start_row": block_info["start_row"],
             "block_rows": len(block_info["rows"]),
             "verified_banks": verified_banks,
             "mismatches": mismatches,
+            "percent_anomalies": percent_anomalies,
             "special_rows": special_rows,
         }
     finally:
@@ -1201,7 +1023,9 @@ def run_market_total_script(args, workbook_path: Path, target_month: str | None 
     if args.market_strict_workbook:
         cmd.append("--strict-workbook")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1226,6 +1050,7 @@ def run_market_total_script(args, workbook_path: Path, target_month: str | None 
         "command": cmd,
         "lookback_months": effective_market_lookback_months(args, target_month),
         "base_month": base_month,
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1263,14 +1088,14 @@ def run_jcic_script(args, workbook_path: Path, base_month: str) -> dict[str, Any
         cmd.extend(["--source-url", args.jcic_source_url])
     if args.jcic_label:
         cmd.extend(["--label", args.jcic_label])
-    if args.jcic_target_row is not None:
-        cmd.extend(["--target-row", str(args.jcic_target_row)])
     if args.jcic_overwrite:
         cmd.append("--overwrite")
     if args.jcic_insecure:
         cmd.append("--insecure")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1295,6 +1120,7 @@ def run_jcic_script(args, workbook_path: Path, base_month: str) -> dict[str, Any
         "command": cmd,
         "base_month": base_month,
         "backfill_months": effective_jcic_backfill_months(args, base_month),
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1341,7 +1167,9 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
     if args.bank_bureau_strict_workbook:
         cmd.append("--strict-workbook")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1364,6 +1192,7 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
         "delegated": True,
         "script": str(script_path),
         "command": cmd,
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1372,7 +1201,7 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="更新銀行局信用卡公開資料.xlsx：以 summary JSON 寫入『歷史資料(年+月)』月 block，並可委派市場總計、JCIC 與銀行局回補腳本；其中 JCIC 的 --jcic-target-row 僅供相容舊參數，新格式下不參與定位"
+        description="更新銀行局信用卡公開資料.xlsx：以 summary JSON 寫入『歷史資料(年+月)』月 block，並委派市場總計、JCIC 與銀行局回補腳本"
     )
     parser.add_argument("--workbook", default=WORKBOOK_DEFAULT, help="Excel 檔案路徑，預設：銀行局信用卡公開資料.xlsx")
     parser.add_argument("--summary", default="", help="run_all_banks.py 產出的 JSON 檔；一般月更新模式必填")
@@ -1397,7 +1226,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jcic-entry-url", default="", help="委派 jcic_avg_cards_update.py 時加上 --entry-url")
     parser.add_argument("--jcic-source-url", default="", help="委派 jcic_avg_cards_update.py 時加上 --source-url")
     parser.add_argument("--jcic-label", default="平均每人持卡張數", help="委派 jcic_avg_cards_update.py 時加上 --label")
-    parser.add_argument("--jcic-target-row", type=int, default=18, help="委派 jcic_avg_cards_update.py 時加上 --target-row；相容舊參數，新格式下不參與定位")
     parser.add_argument("--jcic-backfill-months", type=int, default=24, help="委派 jcic_avg_cards_update.py 時往前回補空白時最多檢查幾個月份，預設 24")
     parser.add_argument("--jcic-overwrite", action="store_true", help="委派 jcic_avg_cards_update.py 時加上 --overwrite")
     parser.add_argument("--jcic-insecure", action="store_true", help="委派 jcic_avg_cards_update.py 時加上 --insecure")
@@ -1415,15 +1243,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--annual-only", action="store_true", help="只執行年度整理；若未指定月份，會嘗試整理工作簿中所有完整年度")
     parser.add_argument("--skip-annual-sync", action="store_true", help="月資料更新完成後不自動整理年度資料")
-    parser.add_argument("--repair-partial-blocks", action="store_true", help="偵測並刪除不完整的月 block 孤兒列（非 13 列一組）；只處理位於工作簿尾端、不影響其他列位置的 partial block，刪除前會在輸出 JSON 回報被移除的值")
+    parser.add_argument("--audit-percent", action="store_true", help="只稽核、不寫入：掃描全表百分比欄（逾期比率、備抵呆帳提足率）的絕對範圍與市場總計 vs 十家銀行的相對關係，回報疑似 100 倍錯值")
+    parser.add_argument("--repair-partial-blocks", action="store_true", help="偵測並刪除不完整的月 block 孤兒列（非 11 列一組）；只處理位於工作簿尾端、不影響其他列位置的 partial block，刪除前會在輸出 JSON 回報被移除的值")
     return parser
 
 
 def main() -> None:
     configure_utf8_stdio()
     args = build_parser().parse_args()
-
-    # annual-only mode is supported below
 
     workbook_path = Path(args.workbook)
     if not workbook_path.exists():
@@ -1432,11 +1259,34 @@ def main() -> None:
     output: dict[str, Any] = {
         "workbook": str(workbook_path),
         "sheet": MAIN_SHEET,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
     }
     warnings: list[str] = []
+    timings: dict[str, float] = {}
+    run_started = time.perf_counter()
+    stage_started = run_started
+
+    def mark(stage: str) -> None:
+        nonlocal stage_started
+        now = time.perf_counter()
+        timings[stage] = round(now - stage_started, 1)
+        stage_started = now
 
     explicit_target_month = roc_month_text(*parse_roc_month(args.target_month)) if args.target_month else None
     explicit_base_month = roc_month_text(*parse_roc_month(args.base_month)) if args.base_month else None
+
+    if args.audit_percent:
+        wb = load_workbook(workbook_path)
+        ws = get_main_sheet(wb)
+        index_map = header_index_map(ws, FIELD_ALIASES)
+        require_headers(index_map, ["yyyymm", "rank", "item"], MAIN_SHEET)
+        output["percent_audit"] = audit_percent_ratios(ws, index_map)
+        if output["percent_audit"]["anomaly_count"]:
+            warnings.append("百分比欄稽核發現異常格，請檢查 percent_audit.anomalies；修正方式：對該月用金管會 ZIP 跑 run_market_total.py --overwrite 或 backfill --overwrite")
+        if warnings:
+            output["warnings"] = warnings
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+        return
 
     if args.repair_partial_blocks:
         wb = load_workbook(workbook_path)
@@ -1536,6 +1386,7 @@ def main() -> None:
 
         set_full_calc_on_load(wb)
         wb.save(workbook_path)
+        mark("write_month_block")
 
         output.update({
             "target_month": target_month,
@@ -1559,14 +1410,17 @@ def main() -> None:
     # 公式才不會建立在「還沒補完」的資料上。
     if not args.skip_bank_bureau_backfill and not args.market_only:
         output["bank_bureau_backfill"] = run_bank_bureau_backfill_script(args, workbook_path, target_month)
+        mark("bank_bureau_backfill")
 
     if not args.skip_market_total:
         output["market_total"] = run_market_total_script(args, workbook_path, target_month, backfill_base_month)
+        mark("market_total")
 
     if not args.skip_jcic_avg_cards:
         if not backfill_base_month:
             raise ValueError("無法判定 JCIC 回補基期月份")
         output["jcic_avg_cards"] = run_jcic_script(args, workbook_path, backfill_base_month)
+        mark("jcic_avg_cards")
 
     if not args.skip_annual_sync and target_month:
         roc_year_value, _ = parse_roc_month(target_month)
@@ -1578,11 +1432,29 @@ def main() -> None:
         set_full_calc_on_load(wb)
         wb.save(workbook_path)
         output["annual_sync"] = annual_sync_result
+        mark("annual_sync")
 
     if not args.market_only and results is not None and target_month:
         output["verification"] = verify_written_block(workbook_path, target_month, results, skipped_banks)
+        mark("verification")
 
     output["item_label_fix_summary"] = item_label_fix_summary
+
+    # 月更新結尾全表稽核百分比欄：抓出任何來源/腳本改版造成的 100 倍錯值。
+    if not args.market_only:
+        wb = load_workbook(workbook_path)
+        try:
+            ws = get_main_sheet(wb)
+            output["percent_audit"] = audit_percent_ratios(ws, header_index_map(ws, FIELD_ALIASES))
+        finally:
+            wb.close()
+        if output["percent_audit"]["anomaly_count"]:
+            warnings.append("百分比欄稽核發現異常格（percent_audit.anomalies），請回報使用者並用官方 ZIP --overwrite 修正該月")
+        mark("percent_audit")
+
+    timings["total"] = round(time.perf_counter() - run_started, 1)
+    output["timings_seconds"] = timings
+    output["finished_at"] = datetime.now().isoformat(timespec="seconds")
 
     if warnings:
         output["warnings"] = warnings

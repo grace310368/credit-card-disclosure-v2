@@ -78,3 +78,47 @@ def normalize_percent_value(value: Any, *, number_format: str = '', assume_perce
 
 def apply_percent_number_format(cell) -> None:
     cell.number_format = PERCENT_NUMBER_FORMAT
+
+
+# ---- 寫入前合理性閘門 --------------------------------------------------------
+# 小數比率的可信範圍 (nonzero_min, max)。超出代表單位錯誤（漏除或多除 100），寫入端應 fail-fast，
+# 不要把值寫進工作簿。逾期三個月比率 100 倍會變成 ≥ 5%、六個月比率 ≥ 2%，備抵呆帳提足率 100 倍會變成 ≥ 5000%。
+PERCENT_SANITY_BOUNDS: dict[str, tuple[float | None, float]] = {
+    'overdue_3m_ratio_percent': (0.00005, 0.05),
+    'overdue_6m_ratio_percent': (None, 0.02),
+    'allowance_coverage_ratio_percent': (0.2, 50.0),
+}
+
+PERCENT_FIELD_LABELS = {
+    'overdue_3m_ratio_percent': '逾期三個月以上比率',
+    'overdue_6m_ratio_percent': '逾期六個月以上比率',
+    'allowance_coverage_ratio_percent': '備抵呆帳提足率',
+}
+
+
+def percent_sanity_error(field: str, value: Any) -> str | None:
+    """value 為小數比率；不在可信範圔時回傳原因文字，否則 None。非百分比欄位或空值一律視為正常。"""
+    bounds = PERCENT_SANITY_BOUNDS.get(field)
+    if bounds is None or value is None or value == '':
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f'{PERCENT_FIELD_LABELS.get(field, field)} 不是數字：{value!r}'
+    nonzero_min, maximum = bounds
+    label = PERCENT_FIELD_LABELS.get(field, field)
+    if number < 0:
+        return f'{label} 為負值：{number}'
+    if number > maximum:
+        return f'{label}={number}（顯示 {number * 100:.2f}%）超過上限 {maximum * 100:.0f}%，疑似百分比數字未除以 100'
+    if nonzero_min is not None and 0 < number < nonzero_min:
+        return f'{label}={number}（顯示 {number * 100:.4f}%）低於下限 {nonzero_min * 100:.3f}%，疑似小數比率被重複除以 100'
+    return None
+
+
+def assert_percent_sane(field: str, value: Any, *, context: str = '') -> None:
+    """寫入工作簿前呼叫；不合理就拋 ValueError，讓整支腳本在存檔前停下。"""
+    reason = percent_sanity_error(field, value)
+    if reason:
+        prefix = f'拒絕寫入 {context}：' if context else '拒絕寫入：'
+        raise ValueError(f'{prefix}{reason}。請先修正來源解析（force_percent_input 規則），不要直接改工作簿。')
