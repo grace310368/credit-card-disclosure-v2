@@ -144,6 +144,7 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
 | `update_credit_card_workbook.py` | 主控：寫月 block＋委派＋年度整理＋讀回驗證 | `--workbook` `--summary` `--month` `--repair-partial-blocks` `--annual-only`（`--skip-*` 平常不要用） | 不上網 | 自身＋3 委派腳本＋3 共用模組＋summary＋工作簿 |
 | `run_market_total.py` | 金管會 ZIP → `市場總計` 列 13 欄 | `--workbook` `--base-month` `--lookback-months` `--zip-file` | 自動 fallback | 自身＋`percent_utils.py`＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
 | `jcic_avg_cards_update.py` | JCIC CSV → `市場總計` 列的 `平均每人持卡張數` | `--workbook` `--base-month`（必填） `--backfill-months` | 自動 fallback | 自身＋`bank_aliases.py`＋`workbook_block_helpers.py`＋工作簿 |
+| `run_report.py` | 彙整 summary、update 輸出、token 快照 → `reports/monthly-update-<yyyymm>.md` 檢討報告 | `--summary` `--update-output` `--tokens` `--retry` `--output` | 不上網 | 自身＋輸入 JSON |
 | `run_bank_bureau_bank_backfill.py` | 金管會 ZIP → 補舊月 10 行空白（13 欄）＋補市場總計列公式 | `--workbook` `--month` / `--newest-month` `--lookback-months` | 自動 fallback | 自身＋3 共用模組＋工作簿 |
 
 共用模組（不可執行）：`percent_utils.py`、`bank_aliases.py`、`workbook_block_helpers.py`。
@@ -199,6 +200,8 @@ input_files（5 個）：`update_credit_card_workbook.py`、`bank_aliases.py`、
   把 `銀行局信用卡公開資料.xlsx` commit 到分支 `auto/monthly-update-<yyyymm>` 並開 PR 到 main（標題「信用卡揭露月更新：<月>」），
   PR 內附 `verification`、`percent_audit`、失敗銀行與警告；**不直接推 main**。中信檔缺少時以 `--allow-partial-summary` 先寫其餘 9 家並在 PR 註明。
 - 每月 15 日 18:30（台灣時間）：結果通知排程讀 GitHub PR 清單，推播當月 PR 連結；沒有 PR 就提醒到維護 session 查看原因。
+- 每次月更新產生 `reports/monthly-update-<yyyymm>.md` 檢討報告（`run_report.py`）：各銀行抓取秒數與重試、回寫各階段秒數（update 輸出的 `timings_seconds`）、
+  驗證與稽核結果、各階段 token 與成本增量（維護 session 用 get_session 快照寫入 `out/tokens.json`）、以及超時／失敗／低效環節的建議。
 - 排程開出的新 session 沒有 repo 憑證與 GitHub 工具，只能做唯讀查詢（提醒、通知）；會寫入 repo 的工作必須綁在有權限的 session。
 - 相依套件由 `.claude/hooks/session-start.sh`（`requirements.txt`：openpyxl、pypdf）在 session 啟動時安裝。
 

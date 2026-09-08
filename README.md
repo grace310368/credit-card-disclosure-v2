@@ -59,6 +59,8 @@
   一般月更新前會預掃不完整月 block 並 fail-fast。
 - `Script/run_market_total.py`：金管會 ZIP → 更新 `市場總計` 列的 13 個指標欄（`市場總計` 欄本身是公式，不動）；支援 lookback 回補與本機 ZIP。
 - `Script/jcic_avg_cards_update.py`：JCIC CSV → 更新 `市場總計` 列的 `平均每人持卡張數`；以 `--base-month` 往前回補空白。
+- `Script/run_report.py`：把 run_all_banks 彙整 JSON、update 輸出 JSON（含 `timings_seconds`）與 token 快照整理成 Markdown 檢討報告
+  （各銀行秒數與重試、各階段秒數、驗證與稽核、各階段 token/成本增量、超時／失敗／低效的建議），排程每月寫到 `reports/`。
 - `Script/run_bank_bureau_bank_backfill.py`：金管會 ZIP → 回補 10 家銀行舊月份空白（13 欄：卡數 4＋金額 6＋比率 3），
   並補齊 `市場總計` 列的 `市場總計`/TOP5/TOP10 公式（從鄰近月份原樣複製）。金額千元→百萬；逾期比率 /100 存小數並套 `0.00%`；13 欄全為必要欄位，缺任一欄該月報錯。
   回補下限 202601；預設只補空白（`--overwrite` 才覆蓋既有值）。該月 ZIP 未發布（金管會回 404 或導回首頁）時記 `skip_missing_banks`，不建空 block。

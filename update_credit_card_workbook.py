@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1022,7 +1023,9 @@ def run_market_total_script(args, workbook_path: Path, target_month: str | None 
     if args.market_strict_workbook:
         cmd.append("--strict-workbook")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1047,6 +1050,7 @@ def run_market_total_script(args, workbook_path: Path, target_month: str | None 
         "command": cmd,
         "lookback_months": effective_market_lookback_months(args, target_month),
         "base_month": base_month,
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1089,7 +1093,9 @@ def run_jcic_script(args, workbook_path: Path, base_month: str) -> dict[str, Any
     if args.jcic_insecure:
         cmd.append("--insecure")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1114,6 +1120,7 @@ def run_jcic_script(args, workbook_path: Path, base_month: str) -> dict[str, Any
         "command": cmd,
         "base_month": base_month,
         "backfill_months": effective_jcic_backfill_months(args, base_month),
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1160,7 +1167,9 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
     if args.bank_bureau_strict_workbook:
         cmd.append("--strict-workbook")
 
+    delegate_started = time.perf_counter()
     completed = subprocess.run(cmd, capture_output=True)
+    delegate_elapsed = round(time.perf_counter() - delegate_started, 1)
     stdout = decode_subprocess_output(completed.stdout).strip()
     stderr = decode_subprocess_output(completed.stderr).strip()
 
@@ -1183,6 +1192,7 @@ def run_bank_bureau_backfill_script(args, workbook_path: Path, newest_month: str
         "delegated": True,
         "script": str(script_path),
         "command": cmd,
+        "elapsed_seconds": delegate_elapsed,
     })
     if stderr:
         payload["stderr"] = stderr
@@ -1249,8 +1259,18 @@ def main() -> None:
     output: dict[str, Any] = {
         "workbook": str(workbook_path),
         "sheet": MAIN_SHEET,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
     }
     warnings: list[str] = []
+    timings: dict[str, float] = {}
+    run_started = time.perf_counter()
+    stage_started = run_started
+
+    def mark(stage: str) -> None:
+        nonlocal stage_started
+        now = time.perf_counter()
+        timings[stage] = round(now - stage_started, 1)
+        stage_started = now
 
     explicit_target_month = roc_month_text(*parse_roc_month(args.target_month)) if args.target_month else None
     explicit_base_month = roc_month_text(*parse_roc_month(args.base_month)) if args.base_month else None
@@ -1366,6 +1386,7 @@ def main() -> None:
 
         set_full_calc_on_load(wb)
         wb.save(workbook_path)
+        mark("write_month_block")
 
         output.update({
             "target_month": target_month,
@@ -1389,14 +1410,17 @@ def main() -> None:
     # 公式才不會建立在「還沒補完」的資料上。
     if not args.skip_bank_bureau_backfill and not args.market_only:
         output["bank_bureau_backfill"] = run_bank_bureau_backfill_script(args, workbook_path, target_month)
+        mark("bank_bureau_backfill")
 
     if not args.skip_market_total:
         output["market_total"] = run_market_total_script(args, workbook_path, target_month, backfill_base_month)
+        mark("market_total")
 
     if not args.skip_jcic_avg_cards:
         if not backfill_base_month:
             raise ValueError("無法判定 JCIC 回補基期月份")
         output["jcic_avg_cards"] = run_jcic_script(args, workbook_path, backfill_base_month)
+        mark("jcic_avg_cards")
 
     if not args.skip_annual_sync and target_month:
         roc_year_value, _ = parse_roc_month(target_month)
@@ -1408,9 +1432,11 @@ def main() -> None:
         set_full_calc_on_load(wb)
         wb.save(workbook_path)
         output["annual_sync"] = annual_sync_result
+        mark("annual_sync")
 
     if not args.market_only and results is not None and target_month:
         output["verification"] = verify_written_block(workbook_path, target_month, results, skipped_banks)
+        mark("verification")
 
     output["item_label_fix_summary"] = item_label_fix_summary
 
@@ -1424,6 +1450,11 @@ def main() -> None:
             wb.close()
         if output["percent_audit"]["anomaly_count"]:
             warnings.append("百分比欄稽核發現異常格（percent_audit.anomalies），請回報使用者並用官方 ZIP --overwrite 修正該月")
+        mark("percent_audit")
+
+    timings["total"] = round(time.perf_counter() - run_started, 1)
+    output["timings_seconds"] = timings
+    output["finished_at"] = datetime.now().isoformat(timespec="seconds")
 
     if warnings:
         output["warnings"] = warnings
