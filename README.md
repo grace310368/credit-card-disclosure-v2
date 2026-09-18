@@ -59,6 +59,7 @@
   一般月更新前會預掃不完整月 block 並 fail-fast。
 - `Script/run_market_total.py`：金管會 ZIP → 更新 `市場總計` 列的 13 個指標欄（`市場總計` 欄本身是公式，不動）；支援 lookback 回補與本機 ZIP。
 - `Script/jcic_avg_cards_update.py`：JCIC CSV → 更新 `市場總計` 列的 `平均每人持卡張數`；以 `--base-month` 往前回補空白。
+- `Script/monthly_update.py`：GitHub Actions 用的月更新驅動程式（抓取三組 → 補跑失敗銀行 → 合併 → 回寫含重試 → 報告 → `out/status.json`、`out/pr_body.md`）
 - `Script/run_report.py`：把 run_all_banks 彙整 JSON、update 輸出 JSON（含 `timings_seconds`）與 token 快照整理成 Markdown 檢討報告
   （各銀行秒數與重試、各階段秒數、驗證與稽核、各階段 token/成本增量、超時／失敗／低效的建議），排程每月寫到 `reports/`。
 - `Script/run_bank_bureau_bank_backfill.py`：金管會 ZIP → 回補 10 家銀行舊月份空白（13 欄：卡數 4＋金額 6＋比率 3），
@@ -162,9 +163,12 @@ python creditcardinfo/Script/run_bank_bureau_bank_backfill.py --workbook 銀行�
 
 ## 自動排程與環境
 
-- Claude Routine 三支（台灣時間）：每月 15 日 11:00 提醒上傳中信檔（新 session，推播）；15 日 17:30 在維護 session 執行月更新，
-  結果 commit 到 `auto/monthly-update-<yyyymm>` 分支並開 PR 到 main，由人工檢查後合併；15 日 18:30 結果通知（新 session，讀 GitHub PR 清單推播）。
-  排程開出的新 session 沒有 repo 憑證與 GitHub 工具，只能唯讀查詢，因此寫入 repo 的工作綁在維護 session。
+- 月更新由 **GitHub Actions** 執行（`.github/workflows/monthly-update.yml`，台灣時間每月 15 日 17:30，也可手動 Run workflow）：
+  `monthly_update.py` 串起情境 A 全流程並產生報告，commit 到 `auto/monthly-update-<yyyymm>` 分支、開 PR 到 main（指派 repo 擁有者），
+  PR 連結寫入 `reports/latest-run.json`；失敗時開 Issue。需在 repo Settings → Actions → General 勾選
+  「Allow GitHub Actions to create and approve pull requests」。
+- Claude Routine 兩支（台灣時間）：15 日 11:00 提醒上傳中信檔；15 日 18:30 用 git 讀最新 `auto/monthly-update-*` 分支的
+  `latest-run.json` 與報告，推播／email 摘要與 PR 連結。這些 session 沒有 GitHub API 存取權，只能用 git 讀公開 repo。
 - `.claude/hooks/session-start.sh` 在 Claude Code on the web 的 session 啟動時安裝 `requirements.txt`
   （openpyxl、pypdf）；本機環境自行 `pip install -r requirements.txt`。
 

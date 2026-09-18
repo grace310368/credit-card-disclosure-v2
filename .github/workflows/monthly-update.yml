@@ -1,0 +1,111 @@
+name: 信用卡揭露月更新
+
+on:
+  schedule:
+    - cron: "30 9 15 * *"   # 台灣時間每月 15 日 17:30（UTC 09:30）
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "目標月（民國，如 115年09月）；留空則取工作簿最新月的下一個月"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: monthly-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安裝相依套件
+        run: pip install --quiet -r requirements.txt
+
+      - name: 執行月更新（抓取 → 回寫 → 稽核 → 報告）
+        id: run
+        continue-on-error: true
+        run: |
+          python -B monthly_update.py --month "${{ inputs.month }}"
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: 讀取執行狀態
+        id: status
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          s = json.loads(pathlib.Path("out/status.json").read_text(encoding="utf-8")) if pathlib.Path("out/status.json").exists() else {}
+          print(f"yyyymm={s.get('yyyymm') or s.get('requested_yyyymm') or ''}")
+          print(f"target={s.get('target_month') or ''}")
+          print(f"error={(s.get('error') or '').replace(chr(10), ' ')[:300]}")
+          print(f"report={s.get('report') or ''}")
+          PY
+
+      - name: 上傳執行記錄（除錯用，保留 30 天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-update-logs
+          path: out/
+          retention-days: 30
+
+      - name: 建立分支並開 PR
+        if: steps.status.outputs.error == ''
+        run: |
+          set -euo pipefail
+          Y="${{ steps.status.outputs.yyyymm }}"
+          BRANCH="auto/monthly-update-$Y"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add "銀行局信用卡公開資料.xlsx" "${{ steps.status.outputs.report }}"
+          if git diff --cached --quiet; then
+            echo "工作簿與報告皆無變更，不開 PR"; exit 0
+          fi
+          git commit -m "月更新：${{ steps.status.outputs.target }}（GitHub Actions）"
+          git push -f -u origin "$BRANCH"
+          TITLE="信用卡揭露月更新：${{ steps.status.outputs.target }}"
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file out/pr_body.md
+            URL=$(gh pr view "$EXISTING" --json url --jq .url)
+          else
+            URL=$(gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file out/pr_body.md --assignee "$OWNER" --reviewer "$OWNER" 2>/dev/null || gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file out/pr_body.md --assignee "$OWNER")
+          fi
+          echo "PR: $URL"
+          # 把 PR 連結寫進報告與 status，讓 18:30 的通知排程用 git 就能讀到
+          printf '\n\n---\nPR：%s\n' "$URL" >> "${{ steps.status.outputs.report }}"
+          python - "$URL" <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path("out/status.json"); s = json.loads(p.read_text(encoding="utf-8")); s["pr_url"] = sys.argv[1]
+          pathlib.Path("reports/latest-run.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+          git add "${{ steps.status.outputs.report }}" reports/latest-run.json
+          git commit -m "補上 PR 連結與執行狀態"
+          git push origin "$BRANCH"
+
+      - name: 失敗時開 Issue 通知
+        if: steps.status.outputs.error != ''
+        run: |
+          set -euo pipefail
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(printf '月更新排程執行失敗。\n\n錯誤：%s\n\n執行記錄（含 out/ 中間檔）：%s\n\n請到 Claude Code 維護 session 說明狀況，或修正後在 Actions 頁面手動重跑（Run workflow）。' "${{ steps.status.outputs.error }}" "$RUN_URL")
+          gh issue create --title "信用卡揭露月更新失敗：$(date -u -d '+8 hours' +%Y-%m-%d)" --body "$BODY" --assignee "$OWNER"
+          exit 1

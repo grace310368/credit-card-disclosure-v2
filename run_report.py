@@ -168,7 +168,7 @@ def build_report(summary: dict[str, Any], update: dict[str, Any], retries: list[
         if total_cost > 5:
             findings.append(f"整次成本 {fmt(total_cost)} USD 偏高：檢查是否有把整份 summary / update JSON 印進對話，或重跑了多次抓取。")
     else:
-        lines += ["## Token 與成本", "", "尚無可計算的 token 增量（需要開始與結束兩筆 get_session 用量快照；排程結束後 10 分鐘會補記）。", ""]
+        lines += ["## Token 與成本", "", "本次未使用 Claude token（GitHub Actions 執行），或未提供開始／結束兩筆用量快照。", ""]
 
     # ---- 檢討 ----
     total_min = (timings.get("total") or 0) / 60 + total_scrape / 60
