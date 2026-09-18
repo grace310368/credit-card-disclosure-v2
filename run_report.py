@@ -59,14 +59,14 @@ def bank_rows(summary: dict[str, Any], retries: list[dict[str, Any]]) -> list[di
 
 
 def token_deltas(tokens: dict[str, Any]) -> list[dict[str, Any]]:
+    """快照為累計值；第一筆是基準點，只回傳之後各階段的增量。只有一筆快照時沒有增量。"""
     stages = tokens.get("stages") or []
+    keys = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")
     out = []
-    prev = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 0.0}
-    for snap in stages:
-        delta = {k: round((snap.get(k) or 0) - (prev.get(k) or 0), 4) for k in prev}
+    for prev, snap in zip(stages, stages[1:]):
+        delta = {k: round((snap.get(k) or 0) - (prev.get(k) or 0), 4) for k in keys}
         delta["stage"] = snap.get("stage")
         out.append(delta)
-        prev = {k: snap.get(k) or 0 for k in prev}
     return out
 
 
@@ -155,7 +155,7 @@ def build_report(summary: dict[str, Any], update: dict[str, Any], retries: list[
     deltas = token_deltas(tokens)
     if deltas:
         lines += ["## Token 與成本（各階段增量）", "", "| 階段 | 輸入 | 輸出 | 快取讀 | 快取寫 | 成本 USD |", "|---|---|---|---|---|---|"]
-        rows_shown = [d for d in deltas[1:]] or deltas  # 第一筆是起點快照，增量為 0，不列
+        rows_shown = deltas
         for d in rows_shown:
             lines.append(f"| {d['stage']} | {fmt(d['input_tokens'])} | {fmt(d['output_tokens'])} | {fmt(d['cache_read_tokens'])} | {fmt(d['cache_write_tokens'])} | {fmt(d['cost_usd'])} |")
         total_out = sum(d["output_tokens"] for d in deltas)
@@ -168,7 +168,7 @@ def build_report(summary: dict[str, Any], update: dict[str, Any], retries: list[
         if total_cost > 5:
             findings.append(f"整次成本 {fmt(total_cost)} USD 偏高：檢查是否有把整份 summary / update JSON 印進對話，或重跑了多次抓取。")
     else:
-        lines += ["## Token 與成本", "", "未提供 token 快照（排程執行時由主 session 在各階段記錄 get_session 用量後傳入）。", ""]
+        lines += ["## Token 與成本", "", "本次未使用 Claude token（GitHub Actions 執行），或未提供開始／結束兩筆用量快照。", ""]
 
     # ---- 檢討 ----
     total_min = (timings.get("total") or 0) / 60 + total_scrape / 60
