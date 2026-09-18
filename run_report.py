@@ -132,9 +132,12 @@ def build_report(summary: dict[str, Any], update: dict[str, Any], retries: list[
             lines.append(f"- {label}：子程序 {fmt(d.get('elapsed_seconds'))} 秒，處理 {len(res)} 個月份，動作 {actions}" + (f"，最新可用 {d.get('latest_available_month')}" if d.get("latest_available_month") else ""))
             for w in d.get("summary_warnings") or []:
                 warnings.append(f"{label}: {w}")
+            unavailable = [r.get("ad_yyyymm") for r in res if r.get("action") == "skip_source_unavailable"]
+            if unavailable:
+                lines.append(f"  - 來源已下架或尚未發布、無法回補的月份：{unavailable}（舊月份屬已知永久缺口，最新月等下月再補）")
             for r in res:
                 if r.get("action") == "skip_fetch_failed":
-                    findings.append(f"{label} 回補 {r.get('ad_yyyymm')} 失敗：{str(r.get('error'))[:100]}。若該月金管會檔已下架屬正常，否則要查。")
+                    findings.append(f"{label} 回補 {r.get('ad_yyyymm')} 失敗：{str(r.get('error'))[:100]}。連線或解析問題，需檢查。")
     lines.append("")
 
     # ---- 驗證與稽核 ----

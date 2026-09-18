@@ -743,6 +743,12 @@ def main() -> None:
             continue
         processed_requested_months.add(yyyymm)
 
+        # 舊月份先看工作簿該列是否還有空白，沒有就不必下載金管會 ZIP（每次省下約 20 次下載）
+        if idx > 0 and not args.overwrite:
+            existing_row = find_market_row(row_map, yyyymm)
+            if existing_row is not None and not row_has_any_blank_metric(ws, existing_row, index_map, LONGFORM_MARKET_FIELDS):
+                continue
+
         market = cache.get(yyyymm)
         if market is None:
             roc_y, roc_m = ad_yyyymm_to_roc(yyyymm)
@@ -750,10 +756,12 @@ def main() -> None:
                 market = fetch_market_total_by_roc(roc_y, roc_m, fetch_options)
                 cache[yyyymm] = market
             except Exception as exc:
+                unavailable = isinstance(exc, zipfile.BadZipFile) or (isinstance(exc, urllib.error.HTTPError) and exc.code == 404)
                 results.append({
                     'ad_yyyymm': yyyymm,
-                    'action': 'skip_fetch_failed',
+                    'action': 'skip_source_unavailable' if unavailable else 'skip_fetch_failed',
                     'error': f'{type(exc).__name__}: {exc}',
+                    'note': '金管會該月檔案已下架或尚未發布，該列空白欄位無法自動補齊' if unavailable else None,
                 })
                 continue
 
