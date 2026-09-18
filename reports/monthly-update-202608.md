@@ -52,3 +52,7 @@
 ## 檢討與建議
 
 - 市場總計 回補 202504 失敗：BadZipFile: https://www.fsc.gov.tw/userfiles/file/11404_%E4%BF%A1%E7%94%A8%E5%8D%A1%E9%87%8D%E8%A6%8。若該月金管會檔已下架屬正常，否則要查。
+
+
+---
+PR：https://github.com/grace310368/credit-card-disclosure-v2/pull/3
