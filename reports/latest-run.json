@@ -1,0 +1,47 @@
+{
+  "started_at": "2026-11-18T07:56:11",
+  "workbook": "銀行局信用卡公開資料.xlsx",
+  "latest_yyyymm": 202609,
+  "requested_yyyymm": 202610,
+  "bank_status": {
+    "中信": "success（115年10月）",
+    "富邦": "success（115年10月）",
+    "國泰": "success（115年10月）",
+    "玉山": "success（115年10月）",
+    "台新": "success（115年10月）",
+    "星展": "success（115年10月）",
+    "聯邦": "success（115年10月）",
+    "永豐": "success（115年10月）",
+    "第一": "success（115年10月）",
+    "遠東": "success（115年10月）"
+  },
+  "success_count": 10,
+  "failed_banks": [],
+  "retried_banks": [],
+  "target_month": "115年10月",
+  "yyyymm": 202610,
+  "branch": "auto/monthly-update-202610",
+  "ctbc_file": "中信信用卡202610.xlsx",
+  "verification": "ok",
+  "mismatches": 0,
+  "percent_anomalies": 0,
+  "warnings": [],
+  "jcic_latest": "115年07月",
+  "market_months": [
+    202609
+  ],
+  "timings": {
+    "write_month_block": 3.5,
+    "bank_bureau_backfill": 3.6,
+    "market_total": 9.0,
+    "jcic_avg_cards": 7.5,
+    "annual_sync": 3.4,
+    "verification": 2.7,
+    "percent_audit": 3.2,
+    "total": 33.0
+  },
+  "report": "reports/monthly-update-202610.md",
+  "elapsed_seconds": 118.7,
+  "finished_at": "2026-11-18T07:58:09",
+  "pr_url": "https://github.com/grace310368/credit-card-disclosure-v2/pull/7"
+}
